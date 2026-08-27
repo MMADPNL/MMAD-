@@ -21,6 +21,9 @@ DATABASE = "bot.db"
 DEPOSIT_MIN = 0.5
 WITHDRAW_MIN = 2.5
 REFERRAL_BONUS = 0.05
+GAME_BET = 0.1
+GAME_WIN = 0.18
+GAME_FEE = 0.02
 
 TON_ADDRESS = "UQCfIahBY06klJFYNyeAcwOxpNKq78yQOSMMHHe4QDZbziwC"
 BANK_CARD = "6219861856357990"
@@ -76,6 +79,8 @@ def init_db():
         player2_id INTEGER,
         game_type TEXT,
         bet_amount REAL,
+        win_amount REAL,
+        fee_amount REAL,
         result TEXT,
         timestamp TEXT DEFAULT CURRENT_TIMESTAMP
     )''')
@@ -766,8 +771,8 @@ async def game_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     game_type, bet_str = match.groups()
     bet = float(bet_str)
-    if bet <= 0:
-        await update.message.reply_text("❌ مبلغ باید مثبت باشد.")
+    if bet != GAME_BET:
+        await update.message.reply_text(f"❌ مبلغ شرط باید {GAME_BET} TRX باشد.")
         return
     if get_balance(user.id) < bet:
         await update.message.reply_text(f"❌ موجودی کافی نیست. موجودی: {format_amount(get_balance(user.id))} TRX")
@@ -829,7 +834,7 @@ async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "mode": "bot" if query.data == "game_bot" else "friends",
         "players": [user.id], "scores": [], "current": 0, "finished": False,
         "paid": {user.id: True}, "user_rolled": False, "bot_rolled": False,
-        "waiting_for_roll": True  # منتظر پیام کاربر برای پرتاب
+        "waiting_for_roll": True
     }
     active_games[chat_id] = session
 
@@ -838,7 +843,8 @@ async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             f"🤖 بازی با ربات شروع شد.\n"
             f"نوع بازی: {data['game_type']}\n"
-            f"مبلغ شرط: {format_amount(data['bet'])} TRX\n\n"
+            f"مبلغ شرط: {format_amount(data['bet'])} TRX\n"
+            f"جایزه برنده: {format_amount(GAME_WIN)} TRX\n\n"
             f"👤 {get_user_name(user.id)} نوبت شماست!\n"
             f"لطفاً یک پیام (هر چیزی) در این گفت‌وگو ارسال کنید تا {GAME_EMOJIS[data['game_type']]} بیندازید."
         )
@@ -846,26 +852,23 @@ async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             f"👥 بازی با دوستان شروع شد.\n"
             f"نوع بازی: {data['game_type']}\n"
-            f"مبلغ شرط: {format_amount(data['bet'])} TRX\n\n"
+            f"مبلغ شرط: {format_amount(data['bet'])} TRX\n"
+            f"جایزه برنده: {format_amount(GAME_WIN)} TRX\n\n"
             f"👤 {get_user_name(user.id)} نوبت شماست!\n"
             f"لطفاً یک پیام (هر چیزی) در این گفت‌وگو ارسال کنید تا {GAME_EMOJIS[data['game_type']]} بیندازید.\n"
             f"(بازیکن دوم بعداً می‌تواند با ارسال پیام بپیوندد)"
         )
 
-# این تابع هر پیام متنی در گروه رو بررسی میکنه
 async def game_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
     
-    # چک کردن اینکه آیا بازی فعالی در این چت هست
     session = active_games.get(chat_id)
     if not session or session["finished"]:
         return
     
-    # اگر بازی با ربات است و ربات مشغول نیست ولی کاربری که پیام داده نوبتش نیست، نادیده بگیر
     if session["mode"] == "bot":
         if session["current"] == 0:
-            # نوبت کاربر اول
             if session["players"][0] != user.id:
                 await update.message.reply_text("⏳ الان نوبت شما نیست، منتظر نوبت خود باشید.")
                 return
@@ -873,15 +876,11 @@ async def game_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 await update.message.reply_text("⏳ شما قبلاً پرتاب کردید، منتظر ربات باشید.")
                 return
         else:
-            # نوبت ربات
             await update.message.reply_text("🤖 نوبت ربات است، لطفاً صبر کنید...")
             return
     else:
-        # حالت دوستان
         if len(session["players"]) < 2:
-            # اگر نفر دوم می‌خواد بپیوندد
             if user.id != session["players"][0]:
-                # نفر دوم داره می‌پیوندد
                 if get_balance(user.id) < session["bet"]:
                     await update.message.reply_text("❌ موجودی کافی برای شرکت در بازی ندارید.")
                     return
@@ -898,7 +897,6 @@ async def game_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     f"نوبت شماست، یک پیام ارسال کنید تا {GAME_EMOJIS[session['game_type']]} بیندازید."
                 )
                 return
-        # بررسی نوبت
         if session["current"] >= len(session["players"]):
             return
         if session["players"][session["current"]] != user.id:
@@ -911,7 +909,7 @@ async def game_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             session["paid"][user.id] = True
             add_transaction(user.id, None, session["bet"], "game", f"شرط {session['game_type']} با دوستان")
     
-    # حالا کاربر می‌خواد پرتاب کنه (هر پیامی فرستاده)
+    # کاربر پرتاب میکنه
     emoji = GAME_EMOJIS[session["game_type"]]
     dice_msg = await context.bot.send_dice(chat_id=chat_id, emoji=emoji)
     value = dice_msg.dice.value
@@ -924,10 +922,8 @@ async def game_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             f"🎲 {get_user_name(user.id)}: {value}\n\n"
             f"🤖 نوبت ربات..."
         )
-        # ربات بعد از ۲ ثانیه پرتاب میکنه
         context.job_queue.run_once(bot_roll, 2.0, context=chat_id)
     else:
-        # حالت دوستان
         session["current"] += 1
         if len(session["scores"]) == len(session["players"]):
             await finish_game(chat_id, context)
@@ -1013,15 +1009,16 @@ async def finish_game(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
             return
 
     if winner:
-        prize = bet * 2
+        prize = GAME_WIN  # 0.18 TRX
+        # کارمزد 0.02 حذف میشه (به کسی داده نمیشه)
         update_balance(winner, prize)
-        add_transaction(None, winner, prize, "game", f"برد در {game_type}")
+        add_transaction(None, winner, prize, "game", f"برد در {game_type} - جایزه {format_amount(prize)}")
 
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
     c.execute(
-        "INSERT INTO games (player1_id, player2_id, game_type, bet_amount, result) VALUES (?, ?, ?, ?, ?)",
-        (players[0], players[1] if len(players) > 1 else 0, game_type, bet, "win" if winner else "tie")
+        "INSERT INTO games (player1_id, player2_id, game_type, bet_amount, win_amount, fee_amount, result) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (players[0], players[1] if len(players) > 1 else 0, game_type, bet, GAME_WIN, GAME_FEE, "win" if winner else "tie")
     )
     conn.commit()
     conn.close()
@@ -1281,7 +1278,6 @@ def main():
     app.add_handler(MessageHandler(filters.Regex(r'^(موجودی|موجودی من)$'), balance_text))
     app.add_handler(MessageHandler(filters.Regex(r'^انتقال\s+'), transfer))
     app.add_handler(MessageHandler(filters.Regex(r'^1\s+(تاس|بولینگ|دارت|بسکتبال)\s+\d+(?:\.\d+)?$'), game_start))
-    # هندلر برای پیام‌های داخل بازی
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, game_message_handler))
 
     # Callback handlers
