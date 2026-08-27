@@ -315,6 +315,12 @@ async def deposit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_blocked(user.id):
         await update.message.reply_text("⛔ شما مسدود شده‌اید.")
         return ConversationHandler.END
+    
+    # فقط در پیوی کار کنه، توی گروه نه
+    if update.effective_chat.type != "private":
+        await update.message.reply_text("❌ لطفاً برای شارژ به پیوی ربات بروید: @BET_BTBOT")
+        return ConversationHandler.END
+    
     keyboard = [
         [InlineKeyboardButton("0.5", callback_data="dep_quick_0.5"),
          InlineKeyboardButton("1", callback_data="dep_quick_1")],
@@ -543,6 +549,12 @@ async def withdraw_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_blocked(user.id):
         await update.message.reply_text("⛔ شما مسدود شده‌اید.")
         return ConversationHandler.END
+    
+    # فقط در پیوی کار کنه
+    if update.effective_chat.type != "private":
+        await update.message.reply_text("❌ لطفاً برای برداشت به پیوی ربات بروید: @BET_BTBOT")
+        return ConversationHandler.END
+    
     keyboard = [
         [InlineKeyboardButton("2.5", callback_data="with_quick_2.5"),
          InlineKeyboardButton("5", callback_data="with_quick_5")],
@@ -765,6 +777,12 @@ async def game_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_blocked(user.id):
         await update.message.reply_text("⛔ شما مسدود شده‌اید.")
         return
+    
+    # فقط در گروه کار کنه
+    if update.effective_chat.type == "private":
+        await update.message.reply_text("❌ لطفاً برای بازی به گروه بروید.")
+        return
+    
     text = persian_to_english(update.message.text.strip())
     match = re.match(r'^1\s+(تاس|بولینگ|دارت|بسکتبال)\s+(\d+(?:\.\d+)?)$', text)
     if not match:
@@ -863,6 +881,10 @@ async def game_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     chat_id = update.effective_chat.id
     user = update.effective_user
     
+    # اگر پیام از پیوی باشه نادیده بگیر
+    if update.effective_chat.type == "private":
+        return
+    
     session = active_games.get(chat_id)
     if not session or session["finished"]:
         return
@@ -909,7 +931,7 @@ async def game_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             session["paid"][user.id] = True
             add_transaction(user.id, None, session["bet"], "game", f"شرط {session['game_type']} با دوستان")
     
-    # کاربر پرتاب میکنه
+    # کاربر پرتاب میکنه - ربات تاس رو می‌فرسته
     emoji = GAME_EMOJIS[session["game_type"]]
     dice_msg = await context.bot.send_dice(chat_id=chat_id, emoji=emoji)
     value = dice_msg.dice.value
@@ -1010,7 +1032,6 @@ async def finish_game(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
 
     if winner:
         prize = GAME_WIN  # 0.18 TRX
-        # کارمزد 0.02 حذف میشه (به کسی داده نمیشه)
         update_balance(winner, prize)
         add_transaction(None, winner, prize, "game", f"برد در {game_type} - جایزه {format_amount(prize)}")
 
@@ -1287,7 +1308,7 @@ def main():
     app.add_handler(CallbackQueryHandler(withdraw_callback, pattern="^with_"))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin_"))
 
-    # Conversations
+    # Conversations - با allow_reentry=True برای کار در گروه
     deposit_conv = ConversationHandler(
         entry_points=[],
         states={
@@ -1297,6 +1318,7 @@ def main():
         },
         fallbacks=[CommandHandler("cancel", lambda u,c: c.bot.send_message(u.effective_chat.id, "لغو شد."))],
         allow_reentry=True,
+        per_message=False,
     )
     app.add_handler(deposit_conv)
 
@@ -1309,6 +1331,7 @@ def main():
         },
         fallbacks=[CommandHandler("cancel", lambda u,c: c.bot.send_message(u.effective_chat.id, "لغو شد."))],
         allow_reentry=True,
+        per_message=False,
     )
     app.add_handler(withdraw_conv)
 
@@ -1319,6 +1342,7 @@ def main():
         },
         fallbacks=[CommandHandler("cancel", lambda u,c: c.bot.send_message(u.effective_chat.id, "لغو شد."))],
         allow_reentry=True,
+        per_message=False,
     )
     app.add_handler(owner_deposit_conv)
 
@@ -1329,6 +1353,7 @@ def main():
         },
         fallbacks=[CommandHandler("cancel", lambda u,c: c.bot.send_message(u.effective_chat.id, "لغو شد."))],
         allow_reentry=True,
+        per_message=False,
     )
     app.add_handler(owner_withdraw_conv)
 
