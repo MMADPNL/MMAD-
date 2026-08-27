@@ -31,12 +31,13 @@ BANK_OWNER = "محمد امین"
 
 GAME_EMOJIS = {"تاس": "🎲", "بولینگ": "🎳", "دارت": "🎯", "بسکتبال": "🏀"}
 
-# Conversation states - منحصر به فرد برای هر بخش
+# Conversation states
 DEPOSIT_AMOUNT, DEPOSIT_METHOD, DEPOSIT_PROOF = range(1, 4)
 WITHDRAW_AMOUNT, WITHDRAW_METHOD, WITHDRAW_PROOF = range(4, 7)
 OWNER_DEPOSIT_AMOUNT, OWNER_WITHDRAW_AMOUNT = range(7, 9)
 ADMIN_GET_USER_ID, ADMIN_GET_AMOUNT = range(9, 11)
 ADMIN_GET_USER_ID_FOR_BLOCK, ADMIN_GET_USER_ID_FOR_UNBLOCK = range(11, 13)
+ADMIN_BACK = 14
 
 # In-memory
 pending_games = {}
@@ -315,7 +316,6 @@ async def deposit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_blocked(user.id):
         await update.message.reply_text("⛔ شما مسدود شده‌اید.")
         return ConversationHandler.END
-    # فقط در پیوی کار کنه
     if update.effective_chat.type != "private":
         await update.message.reply_text("❌ لطفاً برای شارژ به پیوی ربات بروید.")
         return ConversationHandler.END
@@ -480,12 +480,12 @@ async def deposit_confirm_callback(update: Update, context: ContextTypes.DEFAULT
     if not row:
         await query.edit_message_text("❌ درخواست یافت نشد.")
         conn.close()
-        return
+        return ConversationHandler.END
     user_id, amount, status = row
     if status != "pending":
         await query.edit_message_text(f"❌ درخواست قبلاً {status} شده.")
         conn.close()
-        return
+        return ConversationHandler.END
     if action == "confirm":
         context.user_data["deposit_req_id"] = req_id
         await query.edit_message_text(
@@ -547,7 +547,6 @@ async def withdraw_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_blocked(user.id):
         await update.message.reply_text("⛔ شما مسدود شده‌اید.")
         return ConversationHandler.END
-    # فقط در پیوی کار کنه
     if update.effective_chat.type != "private":
         await update.message.reply_text("❌ لطفاً برای برداشت به پیوی ربات بروید.")
         return ConversationHandler.END
@@ -703,12 +702,12 @@ async def withdraw_confirm_callback(update: Update, context: ContextTypes.DEFAUL
     if not row:
         await query.edit_message_text("❌ درخواست یافت نشد.")
         conn.close()
-        return
+        return ConversationHandler.END
     user_id, amount, status = row
     if status != "pending":
         await query.edit_message_text(f"❌ درخواست قبلاً {status} شده.")
         conn.close()
-        return
+        return ConversationHandler.END
     if action == "confirm":
         context.user_data["withdraw_req_id"] = req_id
         await query.edit_message_text(
@@ -749,7 +748,7 @@ async def withdraw_owner_amount(update: Update, context: ContextTypes.DEFAULT_TY
     user_id = row[0]
     if get_balance(user_id) < amount:
         await update.message.reply_text(f"❌ موجودی کاربر کافی نیست. موجودی: {format_amount(get_balance(user_id))} TRX")
-        return
+        return ConversationHandler.END
     c.execute("UPDATE withdraw_requests SET status='approved', admin_id=? WHERE id=?", (OWNER_ID, req_id))
     conn.commit()
     conn.close()
@@ -773,7 +772,6 @@ async def game_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_blocked(user.id):
         await update.message.reply_text("⛔ شما مسدود شده‌اید.")
         return
-    # فقط در گروه کار کنه
     if update.effective_chat.type == "private":
         await update.message.reply_text("❌ لطفاً برای بازی به گروه بروید.")
         return
@@ -846,7 +844,6 @@ async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "mode": "bot" if query.data == "game_bot" else "friends",
         "players": [user.id], "scores": [], "current": 0, "finished": False,
         "paid": {user.id: True}, "user_rolled": False, "bot_rolled": False,
-        "waiting_for_roll": True
     }
     active_games[chat_id] = session
 
@@ -874,7 +871,6 @@ async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def game_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
-    # فقط در گروه کار کنه
     if update.effective_chat.type == "private":
         return
     session = active_games.get(chat_id)
@@ -921,7 +917,7 @@ async def game_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 return
             session["paid"][user.id] = True
             add_transaction(user.id, None, session["bet"], "game", f"شرط {session['game_type']} با دوستان")
-    # کاربر با ارسال پیام پرتاب میکنه
+    # کاربر پرتاب میکنه
     emoji = GAME_EMOJIS[session["game_type"]]
     dice_msg = await context.bot.send_dice(chat_id=chat_id, emoji=emoji)
     value = dice_msg.dice.value
@@ -1059,12 +1055,12 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id != OWNER_ID:
         await query.edit_message_text("⛔ دسترسی ندارید.")
-        return
+        return ConversationHandler.END
     data = query.data
     if data == "admin_close":
         await query.edit_message_text("❌ پنل مدیریت بسته شد.")
         return ConversationHandler.END
-    if data == "admin_stats":
+    elif data == "admin_stats":
         conn = sqlite3.connect(DATABASE)
         c = conn.cursor()
         c.execute("SELECT COUNT(*) FROM users")
