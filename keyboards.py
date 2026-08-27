@@ -6,24 +6,15 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram import ReplyKeyboardMarkup
 
 
-# ---------------------------------------------------------
+# =========================================================
 # منوی اصلی
-# ---------------------------------------------------------
+# =========================================================
 
 def main_menu():
     keyboard = [
-        [
-            "💰 موجودی",
-            "➕ واریز",
-        ],
-        [
-            "➖ برداشت",
-            "🎮 مثال بازی",
-        ],
-        [
-            "👥 زیرمجموعه",
-            "🆘 پشتیبانی",
-        ],
+        ["💰 موجودی", "➕ واریز"],
+        ["➖ برداشت", "🎮 مثال بازی"],
+        ["👥 زیرمجموعه", "🆘 پشتیبانی"],
     ]
 
     return ReplyKeyboardMarkup(
@@ -32,29 +23,20 @@ def main_menu():
     )
 
 
-# ---------------------------------------------------------
+# =========================================================
 # پنل مدیریت
-# ---------------------------------------------------------
+# =========================================================
 
 def admin_menu():
     keyboard = [
-        [
-            "👥 کاربران",
-            "💰 مدیریت موجودی",
-        ],
-        [
-            "📥 درخواست‌های واریز",
-            "📤 درخواست‌های برداشت",
-        ],
-        [
-            "🆘 پیام‌های پشتیبانی",
-        ],
-        [
-            "⚙️ تنظیمات",
-        ],
-        [
-            "🔙 بازگشت",
-        ],
+        ["👥 کاربران", "💰 آمار موجودی"],
+        ["👤 اضافه کردن ادمین", "❌ حذف ادمین"],
+        ["🟢 روشن کردن ربات", "🔴 خاموش کردن ربات"],
+        ["📥 درخواست‌های واریز"],
+        ["📤 درخواست‌های برداشت"],
+        ["🆘 پیام‌های پشتیبانی"],
+        ["⚙️ تنظیمات"],
+        ["🔙 بازگشت"],
     ]
 
     return ReplyKeyboardMarkup(
@@ -63,9 +45,9 @@ def admin_menu():
     )
 
 
-# ---------------------------------------------------------
+# =========================================================
 # انتخاب روش واریز
-# ---------------------------------------------------------
+# =========================================================
 
 def deposit_methods():
     keyboard = [
@@ -98,9 +80,9 @@ def deposit_methods():
     return InlineKeyboardMarkup(keyboard)
 
 
-# ---------------------------------------------------------
-# دکمه‌های بازی
-# ---------------------------------------------------------
+# =========================================================
+# بازی
+# =========================================================
 
 def game_start_buttons(game: str, amount: float):
     keyboard = [
@@ -127,9 +109,9 @@ def game_start_buttons(game: str, amount: float):
     return InlineKeyboardMarkup(keyboard)
 
 
-# ---------------------------------------------------------
-# دکمه‌های بازی دوستان
-# ---------------------------------------------------------
+# =========================================================
+# پیوستن به بازی دوستان
+# =========================================================
 
 def friend_game_buttons(game_id: int):
     keyboard = [
@@ -150,9 +132,9 @@ def friend_game_buttons(game_id: int):
     return InlineKeyboardMarkup(keyboard)
 
 
-# ---------------------------------------------------------
+# =========================================================
 # تأیید / رد درخواست
-# ---------------------------------------------------------
+# =========================================================
 
 def request_review_buttons(kind: str, request_id: int):
     keyboard = [
@@ -171,9 +153,9 @@ def request_review_buttons(kind: str, request_id: int):
     return InlineKeyboardMarkup(keyboard)
 
 
-# ---------------------------------------------------------
+# =========================================================
 # پاسخ به کاربر
-# ---------------------------------------------------------
+# =========================================================
 
 def reply_to_user_button(user_id: int):
     keyboard = [
@@ -188,9 +170,9 @@ def reply_to_user_button(user_id: int):
     return InlineKeyboardMarkup(keyboard)
 
 
-# ---------------------------------------------------------
+# =========================================================
 # کپچا
-# ---------------------------------------------------------
+# =========================================================
 
 def captcha_buttons(options):
     keyboard = []
@@ -206,9 +188,9 @@ def captcha_buttons(options):
     return InlineKeyboardMarkup(keyboard)
 
 
-# ---------------------------------------------------------
-# دکمه تأیید برداشت
-# ---------------------------------------------------------
+# =========================================================
+# درخواست برداشت
+# =========================================================
 
 def withdrawal_review_buttons(withdrawal_id: int):
     keyboard = [
@@ -220,16 +202,16 @@ def withdrawal_review_buttons(withdrawal_id: int):
             InlineKeyboardButton(
                 "❌ رد برداشت",
                 callback_data=f"reject:withdrawal:{withdrawal_id}"
-            )
+            ),
         ]
     ]
 
     return InlineKeyboardMarkup(keyboard)
 
 
-# ---------------------------------------------------------
-# دکمه تأیید واریز
-# ---------------------------------------------------------
+# =========================================================
+# درخواست واریز
+# =========================================================
 
 def deposit_review_buttons(deposit_id: int):
     keyboard = [
@@ -241,16 +223,16 @@ def deposit_review_buttons(deposit_id: int):
             InlineKeyboardButton(
                 "❌ رد واریز",
                 callback_data=f"reject:deposit:{deposit_id}"
-            )
+            ),
         ]
     ]
 
     return InlineKeyboardMarkup(keyboard)
 
 
-# ---------------------------------------------------------
-# دکمه‌های مدیریت کاربر
-# ---------------------------------------------------------
+# =========================================================
+# مدیریت کاربر
+# =========================================================
 
 def user_management_buttons(user_id: int):
     keyboard = [
@@ -262,22 +244,22 @@ def user_management_buttons(user_id: int):
             InlineKeyboardButton(
                 "➖ کاهش موجودی",
                 callback_data=f"admin_remove:{user_id}"
-            )
+            ),
         ],
         [
             InlineKeyboardButton(
                 "💰 موجودی کاربر",
                 callback_data=f"admin_balance:{user_id}"
-            )
+            ),
         ],
     ]
 
     return InlineKeyboardMarkup(keyboard)
 
 
-# ---------------------------------------------------------
-# دکمه پاسخ پشتیبانی
-# ---------------------------------------------------------
+# =========================================================
+# پشتیبانی
+# =========================================================
 
 def support_admin_buttons(user_id: int, support_id: int):
     keyboard = [
@@ -292,9 +274,9 @@ def support_admin_buttons(user_id: int, support_id: int):
     return InlineKeyboardMarkup(keyboard)
 
 
-# ---------------------------------------------------------
-# دکمه‌های تأیید عملیات
-# ---------------------------------------------------------
+# =========================================================
+# تأیید عملیات
+# =========================================================
 
 def confirm_buttons(action: str):
     keyboard = [
@@ -306,8 +288,100 @@ def confirm_buttons(action: str):
             InlineKeyboardButton(
                 "❌ لغو",
                 callback_data=f"cancel:{action}"
-            )
+            ),
         ]
+    ]
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+# =========================================================
+# کنترل روشن / خاموش ربات
+# =========================================================
+
+def bot_status_buttons():
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "🟢 روشن کردن",
+                callback_data="bot_enable"
+            ),
+            InlineKeyboardButton(
+                "🔴 خاموش کردن",
+                callback_data="bot_disable"
+            ),
+        ]
+    ]
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+# =========================================================
+# تأیید حذف ادمین
+# =========================================================
+
+def remove_admin_confirm(admin_id: int):
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "✅ بله، حذف شود",
+                callback_data=f"remove_admin_confirm:{admin_id}"
+            ),
+            InlineKeyboardButton(
+                "❌ لغو",
+                callback_data="remove_admin_cancel"
+            ),
+        ]
+    ]
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+# =========================================================
+# تأیید اضافه کردن ادمین
+# =========================================================
+
+def add_admin_confirm(admin_id: int):
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "✅ اضافه شود",
+                callback_data=f"add_admin_confirm:{admin_id}"
+            ),
+            InlineKeyboardButton(
+                "❌ لغو",
+                callback_data="add_admin_cancel"
+            ),
+        ]
+    ]
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+# =========================================================
+# لیست مدیریت ادمین
+# =========================================================
+
+def admin_action_buttons():
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "👤 اضافه کردن ادمین",
+                callback_data="admin_add_start"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "❌ حذف ادمین",
+                callback_data="admin_remove_start"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🔙 بازگشت",
+                callback_data="admin_back"
+            )
+        ],
     ]
 
     return InlineKeyboardMarkup(keyboard)
