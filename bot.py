@@ -37,7 +37,6 @@ WITHDRAW_AMOUNT, WITHDRAW_METHOD, WITHDRAW_PROOF = range(4, 7)
 OWNER_DEPOSIT_AMOUNT, OWNER_WITHDRAW_AMOUNT = range(7, 9)
 ADMIN_GET_USER_ID, ADMIN_GET_AMOUNT = range(9, 11)
 ADMIN_GET_USER_ID_FOR_BLOCK, ADMIN_GET_USER_ID_FOR_UNBLOCK = range(11, 13)
-ADMIN_BACK = 14
 
 # In-memory
 pending_games = {}
@@ -265,7 +264,7 @@ async def referrals_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"لینک معرفی: `https://t.me/{context.bot.username}?start={user_id}`"
     )
 
-# ===== BALANCE =====
+# ===== BALANCE & TRANSFER =====
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if is_blocked(user.id):
@@ -324,11 +323,12 @@ async def deposit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("1", callback_data="dep_quick_1")],
         [InlineKeyboardButton("2", callback_data="dep_quick_2"),
          InlineKeyboardButton("5", callback_data="dep_quick_5")],
-        [InlineKeyboardButton("مبلغ دلخواه", callback_data="dep_custom")],
+        [InlineKeyboardButton("10", callback_data="dep_quick_10"),
+         InlineKeyboardButton("مبلغ دلخواه", callback_data="dep_custom")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="dep_cancel")],
     ]
     await update.message.reply_text(
-        f"💳 لطفاً مبلغ شارژ را وارد کنید (حداقل {DEPOSIT_MIN} TRX):",
+        f"💳 لطفاً مبلغ شارژ را انتخاب کنید (حداقل {DEPOSIT_MIN} TRX):",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
     return DEPOSIT_AMOUNT
@@ -348,11 +348,11 @@ async def deposit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return DEPOSIT_AMOUNT
         context.user_data["deposit_amount"] = amount
         keyboard = [
-            [InlineKeyboardButton("💎 TON", callback_data="dep_method_ton")],
+            [InlineKeyboardButton("💎 TON (شبکه TON)", callback_data="dep_method_ton")],
             [InlineKeyboardButton("💳 کارت بانکی", callback_data="dep_method_card")],
         ]
         await query.edit_message_text(
-            f"مبلغ درخواستی: {format_amount(amount)} TRX\nلطفاً روش پرداخت را انتخاب کنید:",
+            f"💰 مبلغ: {format_amount(amount)} TRX\n\nلطفاً روش پرداخت را انتخاب کنید:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return DEPOSIT_METHOD
@@ -369,11 +369,11 @@ async def deposit_amount_input(update: Update, context: ContextTypes.DEFAULT_TYP
         return DEPOSIT_AMOUNT
     context.user_data["deposit_amount"] = amount
     keyboard = [
-        [InlineKeyboardButton("💎 TON", callback_data="dep_method_ton")],
+        [InlineKeyboardButton("💎 TON (شبکه TON)", callback_data="dep_method_ton")],
         [InlineKeyboardButton("💳 کارت بانکی", callback_data="dep_method_card")],
     ]
     await update.message.reply_text(
-        f"مبلغ درخواستی: {format_amount(amount)} TRX\nلطفاً روش پرداخت را انتخاب کنید:",
+        f"💰 مبلغ: {format_amount(amount)} TRX\n\nلطفاً روش پرداخت را انتخاب کنید:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
     return DEPOSIT_METHOD
@@ -393,7 +393,7 @@ async def deposit_method_callback(update: Update, context: ContextTypes.DEFAULT_
     else:
         info = f"💳 شماره کارت:\n`{BANK_CARD}`\nبه نام: {BANK_OWNER}\n\nلطفاً پس از واریز، تصویر رسید را ارسال کنید."
 
-    context.user_data["deposit_method"] = method
+    context.user_data["deposit_method"] = "TON" if method == "ton" else "کارت بانکی"
     await query.edit_message_text(
         f"💰 مبلغ: {format_amount(amount)} TRX\n\n{info}\n\n"
         "پس از پرداخت، **تصویر یا هش** را در همین گفت‌وگو ارسال کنید.",
@@ -470,7 +470,7 @@ async def deposit_confirm_callback(update: Update, context: ContextTypes.DEFAULT
     await query.answer()
     if update.effective_user.id != OWNER_ID:
         await query.answer("⛔ دسترسی ندارید.", show_alert=True)
-        return
+        return ConversationHandler.END
     parts = query.data.split('_')
     action, req_id = parts[1], int(parts[2])
     conn = sqlite3.connect(DATABASE)
@@ -558,7 +558,7 @@ async def withdraw_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔙 بازگشت", callback_data="with_cancel")],
     ]
     await update.message.reply_text(
-        f"🏧 لطفاً مبلغ برداشت را وارد کنید (حداقل {WITHDRAW_MIN} TRX):",
+        f"🏧 لطفاً مبلغ برداشت را انتخاب کنید (حداقل {WITHDRAW_MIN} TRX):",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
     return WITHDRAW_AMOUNT
@@ -581,11 +581,11 @@ async def withdraw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return WITHDRAW_AMOUNT
         context.user_data["withdraw_amount"] = amount
         keyboard = [
-            [InlineKeyboardButton("💎 TON", callback_data="with_method_ton")],
+            [InlineKeyboardButton("💎 TON (شبکه TON)", callback_data="with_method_ton")],
             [InlineKeyboardButton("💳 کارت بانکی", callback_data="with_method_card")],
         ]
         await query.edit_message_text(
-            f"مبلغ درخواستی: {format_amount(amount)} TRX\nلطفاً روش برداشت را انتخاب کنید:",
+            f"💰 مبلغ: {format_amount(amount)} TRX\n\nلطفاً روش برداشت را انتخاب کنید:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return WITHDRAW_METHOD
@@ -605,11 +605,11 @@ async def withdraw_amount_input(update: Update, context: ContextTypes.DEFAULT_TY
         return WITHDRAW_AMOUNT
     context.user_data["withdraw_amount"] = amount
     keyboard = [
-        [InlineKeyboardButton("💎 TON", callback_data="with_method_ton")],
+        [InlineKeyboardButton("💎 TON (شبکه TON)", callback_data="with_method_ton")],
         [InlineKeyboardButton("💳 کارت بانکی", callback_data="with_method_card")],
     ]
     await update.message.reply_text(
-        f"مبلغ درخواستی: {format_amount(amount)} TRX\nلطفاً روش برداشت را انتخاب کنید:",
+        f"💰 مبلغ: {format_amount(amount)} TRX\n\nلطفاً روش برداشت را انتخاب کنید:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
     return WITHDRAW_METHOD
@@ -629,7 +629,7 @@ async def withdraw_method_callback(update: Update, context: ContextTypes.DEFAULT
     else:
         info = "💳 لطفاً شماره کارت بانکی خود را وارد کنید:"
 
-    context.user_data["withdraw_method"] = method
+    context.user_data["withdraw_method"] = "TON" if method == "ton" else "کارت بانکی"
     await query.edit_message_text(
         f"💰 مبلغ: {format_amount(amount)} TRX\n\n{info}\n\n"
         "لطفاً اطلاعات حساب خود را ارسال کنید.",
@@ -692,7 +692,7 @@ async def withdraw_confirm_callback(update: Update, context: ContextTypes.DEFAUL
     await query.answer()
     if update.effective_user.id != OWNER_ID:
         await query.answer("⛔ دسترسی ندارید.", show_alert=True)
-        return
+        return ConversationHandler.END
     parts = query.data.split('_')
     action, req_id = parts[1], int(parts[2])
     conn = sqlite3.connect(DATABASE)
