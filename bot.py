@@ -31,7 +31,7 @@ BANK_OWNER = "محمد امین"
 
 GAME_EMOJIS = {"تاس": "🎲", "بولینگ": "🎳", "دارت": "🎯", "بسکتبال": "🏀"}
 
-# Conversation states
+# Conversation states - منحصر به فرد برای هر بخش
 DEPOSIT_AMOUNT, DEPOSIT_METHOD, DEPOSIT_PROOF = range(1, 4)
 WITHDRAW_AMOUNT, WITHDRAW_METHOD, WITHDRAW_PROOF = range(4, 7)
 OWNER_DEPOSIT_AMOUNT, OWNER_WITHDRAW_AMOUNT = range(7, 9)
@@ -315,12 +315,10 @@ async def deposit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_blocked(user.id):
         await update.message.reply_text("⛔ شما مسدود شده‌اید.")
         return ConversationHandler.END
-    
-    # فقط در پیوی کار کنه، توی گروه نه
+    # فقط در پیوی کار کنه
     if update.effective_chat.type != "private":
-        await update.message.reply_text("❌ لطفاً برای شارژ به پیوی ربات بروید: @BET_BTBOT")
+        await update.message.reply_text("❌ لطفاً برای شارژ به پیوی ربات بروید.")
         return ConversationHandler.END
-    
     keyboard = [
         [InlineKeyboardButton("0.5", callback_data="dep_quick_0.5"),
          InlineKeyboardButton("1", callback_data="dep_quick_1")],
@@ -549,12 +547,10 @@ async def withdraw_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_blocked(user.id):
         await update.message.reply_text("⛔ شما مسدود شده‌اید.")
         return ConversationHandler.END
-    
     # فقط در پیوی کار کنه
     if update.effective_chat.type != "private":
-        await update.message.reply_text("❌ لطفاً برای برداشت به پیوی ربات بروید: @BET_BTBOT")
+        await update.message.reply_text("❌ لطفاً برای برداشت به پیوی ربات بروید.")
         return ConversationHandler.END
-    
     keyboard = [
         [InlineKeyboardButton("2.5", callback_data="with_quick_2.5"),
          InlineKeyboardButton("5", callback_data="with_quick_5")],
@@ -777,12 +773,10 @@ async def game_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_blocked(user.id):
         await update.message.reply_text("⛔ شما مسدود شده‌اید.")
         return
-    
     # فقط در گروه کار کنه
     if update.effective_chat.type == "private":
         await update.message.reply_text("❌ لطفاً برای بازی به گروه بروید.")
         return
-    
     text = persian_to_english(update.message.text.strip())
     match = re.match(r'^1\s+(تاس|بولینگ|دارت|بسکتبال)\s+(\d+(?:\.\d+)?)$', text)
     if not match:
@@ -880,15 +874,12 @@ async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def game_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
-    
-    # اگر پیام از پیوی باشه نادیده بگیر
+    # فقط در گروه کار کنه
     if update.effective_chat.type == "private":
         return
-    
     session = active_games.get(chat_id)
     if not session or session["finished"]:
         return
-    
     if session["mode"] == "bot":
         if session["current"] == 0:
             if session["players"][0] != user.id:
@@ -930,19 +921,16 @@ async def game_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 return
             session["paid"][user.id] = True
             add_transaction(user.id, None, session["bet"], "game", f"شرط {session['game_type']} با دوستان")
-    
-    # کاربر پرتاب میکنه - ربات تاس رو می‌فرسته
+    # کاربر با ارسال پیام پرتاب میکنه
     emoji = GAME_EMOJIS[session["game_type"]]
     dice_msg = await context.bot.send_dice(chat_id=chat_id, emoji=emoji)
     value = dice_msg.dice.value
     session["scores"].append(value)
-    
     if session["mode"] == "bot" and session["current"] == 0:
         session["user_rolled"] = True
         session["current"] = 1
         await update.message.reply_text(
-            f"🎲 {get_user_name(user.id)}: {value}\n\n"
-            f"🤖 نوبت ربات..."
+            f"🎲 {get_user_name(user.id)}: {value}\n\n🤖 نوبت ربات..."
         )
         context.job_queue.run_once(bot_roll, 2.0, context=chat_id)
     else:
@@ -984,14 +972,11 @@ async def finish_game(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     bet = session["bet"]
     game_type = session["game_type"]
     mode = session["mode"]
-    
     if len(scores) < 2:
         return
-        
     p1_score, p2_score = scores[0], scores[1]
     result_text = ""
     winner = None
-    
     if p1_score > p2_score:
         winner = players[0]
         result_text = f"🎉 {get_user_name(players[0])} برنده شد!"
@@ -1029,12 +1014,10 @@ async def finish_game(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
                 text=result_text + f"\nپرتاب مجدد... نوبت {get_user_name(players[0])} است.\nلطفاً یک پیام ارسال کنید تا تاس بیندازید."
             )
             return
-
     if winner:
-        prize = GAME_WIN  # 0.18 TRX
+        prize = GAME_WIN
         update_balance(winner, prize)
         add_transaction(None, winner, prize, "game", f"برد در {game_type} - جایزه {format_amount(prize)}")
-
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
     c.execute(
@@ -1043,9 +1026,7 @@ async def finish_game(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     )
     conn.commit()
     conn.close()
-    
     await context.bot.send_message(chat_id=chat_id, text=result_text)
-    
     del active_games[chat_id]
     if mode == "bot":
         global bot_busy, bot_game_chat_id
@@ -1082,7 +1063,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     if data == "admin_close":
         await query.edit_message_text("❌ پنل مدیریت بسته شد.")
-        return
+        return ConversationHandler.END
     if data == "admin_stats":
         conn = sqlite3.connect(DATABASE)
         c = conn.cursor()
@@ -1099,6 +1080,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📊 آمار کلی:\n👥 کاربران: {total_users}\n🎮 بازی‌ها: {total_games}\n💰 واریزها: {format_amount(total_dep)} TRX\n🏧 برداشت‌ها: {format_amount(total_with)} TRX",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]])
         )
+        return ConversationHandler.END
     elif data == "admin_users":
         conn = sqlite3.connect(DATABASE)
         c = conn.cursor()
@@ -1118,6 +1100,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]])
         )
+        return ConversationHandler.END
     elif data in ["admin_balance", "admin_add", "admin_sub"]:
         context.user_data["admin_action"] = data.replace("admin_", "")
         await query.edit_message_text("لطفاً USER_ID کاربر را وارد کنید:")
@@ -1139,6 +1122,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]])
         )
+        return ConversationHandler.END
     elif data == "admin_games":
         conn = sqlite3.connect(DATABASE)
         c = conn.cursor()
@@ -1159,12 +1143,14 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back")]])
         )
+        return ConversationHandler.END
     elif data in ["admin_block", "admin_unblock"]:
         context.user_data["admin_action"] = data.replace("admin_", "")
         await query.edit_message_text("لطفاً USER_ID کاربر را وارد کنید:")
         return ADMIN_GET_USER_ID_FOR_BLOCK
     elif data == "admin_back":
         await admin_command(update, context)
+        return ConversationHandler.END
     return ConversationHandler.END
 
 async def admin_get_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1191,7 +1177,7 @@ async def admin_get_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("لطفاً مبلغ مورد نظر را وارد کنید (عدد):")
         return ADMIN_GET_AMOUNT
     else:
-        await update.message.reply_text("خطا.")
+        await update.message.reply_text("خطا در تشخیص عملیات.")
         return ConversationHandler.END
 
 async def admin_get_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1308,7 +1294,7 @@ def main():
     app.add_handler(CallbackQueryHandler(withdraw_callback, pattern="^with_"))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin_"))
 
-    # Conversations - با allow_reentry=True برای کار در گروه
+    # Deposit conversation
     deposit_conv = ConversationHandler(
         entry_points=[],
         states={
@@ -1322,6 +1308,7 @@ def main():
     )
     app.add_handler(deposit_conv)
 
+    # Withdraw conversation
     withdraw_conv = ConversationHandler(
         entry_points=[],
         states={
@@ -1335,6 +1322,7 @@ def main():
     )
     app.add_handler(withdraw_conv)
 
+    # Owner confirm conversations
     owner_deposit_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(deposit_confirm_callback, pattern="^dep_(confirm|reject)_")],
         states={
@@ -1357,6 +1345,7 @@ def main():
     )
     app.add_handler(owner_withdraw_conv)
 
+    # Admin conversation
     admin_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_callback, pattern="^admin_")],
         states={
