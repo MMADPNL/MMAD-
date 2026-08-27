@@ -13,14 +13,14 @@ from telegram.ext import (
 
 # ===== CONFIG =====
 OWNER_ID = 8552447077
-TOKEN = os.getenv("BOT_TOKEN")
-if not TOKEN:
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN not set.")
 
 DATABASE = "bot.db"
 DEPOSIT_MIN = 0.5
 WITHDRAW_MIN = 2.5
-REF_BONUS = 0.05
+REFERRAL_BONUS = 0.05
 GAME_BET = 0.1
 GAME_WIN = 0.18
 GAME_FEE = 0.02
@@ -31,14 +31,14 @@ BANK_OWNER = "محمد امین"
 
 GAME_EMOJIS = {"تاس": "🎲", "بولینگ": "🎳", "دارت": "🎯", "بسکتبال": "🏀"}
 
-# States
+# Conversation states
 DEPOSIT_AMOUNT, DEPOSIT_METHOD, DEPOSIT_PROOF = range(1, 4)
 WITHDRAW_AMOUNT, WITHDRAW_METHOD, WITHDRAW_PROOF = range(4, 7)
 OWNER_DEPOSIT_AMOUNT, OWNER_WITHDRAW_AMOUNT = range(7, 9)
 ADMIN_GET_USER_ID, ADMIN_GET_AMOUNT = range(9, 11)
-ADMIN_GET_USER_ID_BLOCK, ADMIN_GET_USER_ID_UNBLOCK = range(11, 13)
+ADMIN_GET_USER_ID_FOR_BLOCK, ADMIN_GET_USER_ID_FOR_UNBLOCK = range(11, 13)
 
-# In-memory for games
+# In-memory
 pending_games = {}
 active_games = {}
 bot_busy = False
@@ -108,38 +108,43 @@ def init_db():
     conn.close()
 
 # ===== HELPERS =====
-def get_user(uid):
+def get_user(user_id: int) -> Optional[dict]:
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE user_id = ?", (uid,))
+    c.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
     row = c.fetchone()
     conn.close()
     if row:
-        return {"user_id": row[0], "username": row[1], "first_name": row[2],
-                "balance": row[3], "referrer_id": row[4], "is_blocked": row[5]}
+        return {
+            "user_id": row[0], "username": row[1], "first_name": row[2],
+            "balance": row[3], "referrer_id": row[4], "is_blocked": row[5],
+            "created_at": row[6]
+        }
     return None
 
-def create_user(uid, username=None, first_name=None, ref=None):
+def create_user(user_id: int, username=None, first_name=None, referrer_id=None):
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
-    c.execute("SELECT user_id FROM users WHERE user_id = ?", (uid,))
+    c.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
     if c.fetchone():
         conn.close()
         return
-    c.execute("INSERT INTO users (user_id, username, first_name, referrer_id) VALUES (?, ?, ?, ?)",
-              (uid, username, first_name, ref))
-    if ref and ref != uid:
-        if update_balance(ref, REF_BONUS):
-            add_transaction(None, ref, REF_BONUS, "referral", f"پاداش معرفی {uid}")
+    c.execute(
+        "INSERT INTO users (user_id, username, first_name, referrer_id) VALUES (?, ?, ?, ?)",
+        (user_id, username, first_name, referrer_id)
+    )
+    if referrer_id and referrer_id != user_id:
+        if update_balance(referrer_id, REFERRAL_BONUS):
+            add_transaction(None, referrer_id, REFERRAL_BONUS, "referral", f"پاداش معرفی {user_id}")
             c.execute("INSERT INTO referrals (referrer_id, referred_id, bonus) VALUES (?, ?, ?)",
-                      (ref, uid, REF_BONUS))
+                      (referrer_id, user_id, REFERRAL_BONUS))
     conn.commit()
     conn.close()
 
-def update_balance(uid, delta):
+def update_balance(user_id: int, delta: float) -> bool:
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
-    c.execute("SELECT balance FROM users WHERE user_id = ?", (uid,))
+    c.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
     row = c.fetchone()
     if row is None:
         conn.close()
@@ -148,58 +153,72 @@ def update_balance(uid, delta):
     if new_bal < 0:
         conn.close()
         return False
-    c.execute("UPDATE users SET balance = ? WHERE user_id = ?", (new_bal, uid))
+    c.execute("UPDATE users SET balance = ? WHERE user_id = ?", (new_bal, user_id))
     conn.commit()
     conn.close()
     return True
 
-def get_balance(uid):
-    user = get_user(uid)
+def get_balance(user_id: int) -> float:
+    user = get_user(user_id)
     return user["balance"] if user else 0.0
 
 def add_transaction(sender, receiver, amount, ttype, desc=""):
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
-    c.execute("INSERT INTO transactions (sender_id, receiver_id, amount, type, description) VALUES (?,?,?,?,?)",
-              (sender, receiver, amount, ttype, desc))
+    c.execute(
+        "INSERT INTO transactions (sender_id, receiver_id, amount, type, description) VALUES (?, ?, ?, ?, ?)",
+        (sender, receiver, amount, ttype, desc)
+    )
     conn.commit()
     conn.close()
 
-def is_blocked(uid):
-    user = get_user(uid)
+def is_blocked(user_id: int) -> bool:
+    user = get_user(user_id)
     return bool(user["is_blocked"]) if user else False
 
-def set_block(uid, block):
+def set_block(user_id: int, block: bool):
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
-    c.execute("UPDATE users SET is_blocked = ? WHERE user_id = ?", (1 if block else 0, uid))
+    c.execute("UPDATE users SET is_blocked = ? WHERE user_id = ?", (1 if block else 0, user_id))
     conn.commit()
     conn.close()
 
-def parse_amount(text):
-    text = re.sub(r'[۰۱۲۳۴۵۶۷۸۹]', lambda m: str('۰۱۲۳۴۵۶۷۸۹'.index(m.group())), text)
+def persian_to_english(s: str) -> str:
+    mapping = {'۰': '0', '۱': '1', '۲': '2', '۳': '3', '۴': '4',
+               '۵': '5', '۶': '6', '۷': '7', '۸': '8', '۹': '9'}
+    for p, e in mapping.items():
+        s = s.replace(p, e)
+    return s
+
+def parse_amount(text: str) -> Optional[float]:
+    text = persian_to_english(text)
     match = re.search(r'(\d+(?:\.\d+)?)', text)
-    return float(match.group(1)) if match else None
+    if match:
+        try:
+            return float(match.group(1))
+        except ValueError:
+            return None
+    return None
 
-def format_amount(amt):
-    return f"{amt:.2f}"
+def format_amount(amount: float) -> str:
+    return f"{amount:.2f}"
 
-def get_user_name(uid):
-    user = get_user(uid)
+def get_user_name(user_id: int) -> str:
+    user = get_user(user_id)
     if user:
-        return user["first_name"] or user["username"] or str(uid)
-    return str(uid)
+        return user["first_name"] or user["username"] or str(user_id)
+    return str(user_id)
 
 # ===== START =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     args = context.args
-    ref = None
+    referrer_id = None
     if args and args[0].isdigit():
-        ref = int(args[0])
-        if ref == user.id:
-            ref = None
-    create_user(user.id, user.username, user.first_name, ref)
+        referrer_id = int(args[0])
+        if referrer_id == user.id:
+            referrer_id = None
+    create_user(user.id, user.username, user.first_name, referrer_id)
     if is_blocked(user.id):
         await update.message.reply_text("⛔ شما مسدود شده‌اید.")
         return
@@ -230,17 +249,19 @@ async def referral_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def referrals_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    uid = update.effective_user.id
+    user_id = update.effective_user.id
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id = ?", (uid,))
+    c.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id = ?", (user_id,))
     count = c.fetchone()[0]
-    c.execute("SELECT SUM(bonus) FROM referrals WHERE referrer_id = ?", (uid,))
-    total = c.fetchone()[0] or 0
+    c.execute("SELECT SUM(bonus) FROM referrals WHERE referrer_id = ?", (user_id,))
+    total_bonus = c.fetchone()[0] or 0
     conn.close()
     await query.edit_message_text(
-        f"👥 زیرمجموعه‌های شما:\nتعداد: {count}\nجمع پاداش: {format_amount(total)} TRX\n\n"
-        f"لینک معرفی: `https://t.me/{context.bot.username}?start={uid}`"
+        f"👥 زیرمجموعه‌های شما:\n"
+        f"تعداد: {count}\n"
+        f"جمع پاداش: {format_amount(total_bonus)} TRX\n\n"
+        f"لینک معرفی: `https://t.me/{context.bot.username}?start={user_id}`"
     )
 
 # ===== BALANCE & TRANSFER =====
@@ -315,6 +336,7 @@ async def deposit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def deposit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    user = update.effective_user
     data = query.data
     if data == "dep_cancel":
         await query.edit_message_text("❌ شارژ لغو شد.")
@@ -340,6 +362,7 @@ async def deposit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def deposit_amount_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
     amount = parse_amount(update.message.text)
     if not amount or amount < DEPOSIT_MIN:
         await update.message.reply_text(f"❌ عدد معتبر حداقل {DEPOSIT_MIN} وارد کنید.")
@@ -358,6 +381,7 @@ async def deposit_amount_input(update: Update, context: ContextTypes.DEFAULT_TYP
 async def deposit_method_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    user = update.effective_user
     method = query.data.split("_")[2]
     amount = context.user_data.get("deposit_amount")
     if not amount:
@@ -419,9 +443,18 @@ async def deposit_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("❌ رد", callback_data=f"dep_reject_{req_id}")]
     ]
     if proof_photo:
-        await context.bot.send_photo(OWNER_ID, proof_photo, caption=owner_text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await context.bot.send_photo(
+            chat_id=OWNER_ID,
+            photo=proof_photo,
+            caption=owner_text,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
     else:
-        await context.bot.send_message(OWNER_ID, owner_text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await context.bot.send_message(
+            chat_id=OWNER_ID,
+            text=owner_text,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
     await update.message.reply_text(
         f"✅ درخواست شارژ {format_amount(amount)} TRX ارسال شد.\n"
@@ -533,6 +566,7 @@ async def withdraw_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def withdraw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    user = update.effective_user
     data = query.data
     if data == "with_cancel":
         await query.edit_message_text("❌ برداشت لغو شد.")
@@ -542,8 +576,8 @@ async def withdraw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if amount < WITHDRAW_MIN:
             await query.edit_message_text(f"❌ حداقل مبلغ {WITHDRAW_MIN} TRX است.")
             return WITHDRAW_AMOUNT
-        if get_balance(update.effective_user.id) < amount:
-            await query.edit_message_text(f"❌ موجودی کافی نیست. موجودی: {format_amount(get_balance(update.effective_user.id))} TRX")
+        if get_balance(user.id) < amount:
+            await query.edit_message_text(f"❌ موجودی کافی نیست. موجودی: {format_amount(get_balance(user.id))} TRX")
             return WITHDRAW_AMOUNT
         context.user_data["withdraw_amount"] = amount
         keyboard = [
@@ -561,12 +595,13 @@ async def withdraw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def withdraw_amount_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
     amount = parse_amount(update.message.text)
     if not amount or amount < WITHDRAW_MIN:
         await update.message.reply_text(f"❌ عدد معتبر حداقل {WITHDRAW_MIN} وارد کنید.")
         return WITHDRAW_AMOUNT
-    if get_balance(update.effective_user.id) < amount:
-        await update.message.reply_text(f"❌ موجودی کافی نیست. موجودی: {format_amount(get_balance(update.effective_user.id))} TRX")
+    if get_balance(user.id) < amount:
+        await update.message.reply_text(f"❌ موجودی کافی نیست. موجودی: {format_amount(get_balance(user.id))} TRX")
         return WITHDRAW_AMOUNT
     context.user_data["withdraw_amount"] = amount
     keyboard = [
@@ -582,6 +617,7 @@ async def withdraw_amount_input(update: Update, context: ContextTypes.DEFAULT_TY
 async def withdraw_method_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    user = update.effective_user
     method = query.data.split("_")[2]
     amount = context.user_data.get("withdraw_amount")
     if not amount:
@@ -636,7 +672,11 @@ async def withdraw_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("✅ تأیید", callback_data=f"with_confirm_{req_id}"),
          InlineKeyboardButton("❌ رد", callback_data=f"with_reject_{req_id}")]
     ]
-    await context.bot.send_message(OWNER_ID, owner_text, reply_markup=InlineKeyboardMarkup(keyboard))
+    await context.bot.send_message(
+        chat_id=OWNER_ID,
+        text=owner_text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
     await update.message.reply_text(
         f"✅ درخواست برداشت {format_amount(amount)} TRX ارسال شد.\n"
@@ -735,7 +775,7 @@ async def game_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
         await update.message.reply_text("❌ لطفاً برای بازی به گروه بروید.")
         return
-    text = re.sub(r'[۰۱۲۳۴۵۶۷۸۹]', lambda m: str('۰۱۲۳۴۵۶۷۸۹'.index(m.group())), update.message.text.strip())
+    text = persian_to_english(update.message.text.strip())
     match = re.match(r'^1\s+(تاس|بولینگ|دارت|بسکتبال)\s+(\d+(?:\.\d+)?)$', text)
     if not match:
         return
@@ -1099,7 +1139,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data in ["admin_block", "admin_unblock"]:
         context.user_data["admin_action"] = data.replace("admin_", "")
         await query.edit_message_text("لطفاً USER_ID کاربر را وارد کنید:")
-        return ADMIN_GET_USER_ID_BLOCK
+        return ADMIN_GET_USER_ID_FOR_BLOCK
     elif data == "admin_back":
         await admin_command(update, context)
         return ConversationHandler.END
@@ -1173,7 +1213,7 @@ async def admin_get_user_id_block(update: Update, context: ContextTypes.DEFAULT_
         target = int(update.message.text.strip())
     except ValueError:
         await update.message.reply_text("❌ USER_ID باید عددی باشد.")
-        return ADMIN_GET_USER_ID_BLOCK
+        return ADMIN_GET_USER_ID_FOR_BLOCK
     if get_user(target) is None:
         await update.message.reply_text("❌ کاربر یافت نشد.")
     else:
@@ -1224,7 +1264,7 @@ def main():
     init_db()
     logging.basicConfig(level=logging.INFO)
 
-    app = Application.builder().token(TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).build()
 
     # Commands
     app.add_handler(CommandHandler("start", start))
@@ -1246,7 +1286,7 @@ def main():
     app.add_handler(CallbackQueryHandler(withdraw_callback, pattern="^with_"))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin_"))
 
-    # Conversations
+    # Deposit conversation
     deposit_conv = ConversationHandler(
         entry_points=[],
         states={
@@ -1260,6 +1300,7 @@ def main():
     )
     app.add_handler(deposit_conv)
 
+    # Withdraw conversation
     withdraw_conv = ConversationHandler(
         entry_points=[],
         states={
@@ -1273,6 +1314,7 @@ def main():
     )
     app.add_handler(withdraw_conv)
 
+    # Owner confirm conversations
     owner_deposit_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(deposit_confirm_callback, pattern="^dep_(confirm|reject)_")],
         states={
@@ -1295,13 +1337,14 @@ def main():
     )
     app.add_handler(owner_withdraw_conv)
 
+    # Admin conversation
     admin_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_callback, pattern="^admin_")],
         states={
             ADMIN_GET_USER_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_get_user_id)],
             ADMIN_GET_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_get_amount)],
-            ADMIN_GET_USER_ID_BLOCK: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_get_user_id_block)],
-            ADMIN_GET_USER_ID_UNBLOCK: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_get_user_id_block)],
+            ADMIN_GET_USER_ID_FOR_BLOCK: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_get_user_id_block)],
+            ADMIN_GET_USER_ID_FOR_UNBLOCK: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_get_user_id_block)],
         },
         fallbacks=[CommandHandler("cancel", lambda u,c: c.bot.send_message(u.effective_chat.id, "لغو شد."))],
         allow_reentry=True,
