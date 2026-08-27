@@ -4,7 +4,7 @@ import logging
 import sqlite3
 import random
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -12,25 +12,25 @@ from telegram.ext import (
     ConversationHandler, ContextTypes, filters
 )
 
-# ============ CONFIGURATION ============
+# ===== CONFIGURATION =====
 OWNER_ID = 8552447077
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN environment variable not set.")
+    raise ValueError("BOT_TOKEN not set.")
 
 DATABASE = "bot.db"
 DEPOSIT_MIN = 0.5
 WITHDRAW_MIN = 2.5
+REFERRAL_BONUS = 0.05  # TRX per referral
 
-# Payment details
+# Payment details (for display only)
 TON_ADDRESS = "UQCfIahBY06klJFYNyeAcwOxpNKq78yQOSMMHHe4QDZbziwC"
 BANK_CARD = "6219861856357990"
 BANK_OWNER = "محمد امین"
 
-# Emojis for games
 GAME_EMOJIS = {"تاس": "🎲", "بولینگ": "🎳", "دارت": "🎯", "بسکتبال": "🏀"}
 
-# Conversation states for deposit/withdraw
+# Conversation states
 (
     DEPOSIT_AMOUNT, DEPOSIT_METHOD, DEPOSIT_PROOF,
     WITHDRAW_AMOUNT, WITHDRAW_METHOD, WITHDRAW_PROOF,
@@ -44,7 +44,7 @@ pending_games = {}
 active_games = {}
 bot_busy = False
 
-# ============ DATABASE ============
+# ===== DATABASE =====
 def init_db():
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
@@ -53,8 +53,16 @@ def init_db():
         username TEXT,
         first_name TEXT,
         balance REAL DEFAULT 0,
+        referrer_id INTEGER,
         is_blocked INTEGER DEFAULT 0,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS referrals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        referrer_id INTEGER,
+        referred_id INTEGER,
+        bonus REAL,
+        timestamp TEXT DEFAULT CURRENT_TIMESTAMP
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS transactions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,7 +105,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-# ============ HELPERS ============
+# ===== HELPERS =====
 def get_user(user_id: int) -> Optional[dict]:
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
@@ -110,18 +118,31 @@ def get_user(user_id: int) -> Optional[dict]:
             "username": row[1],
             "first_name": row[2],
             "balance": row[3],
-            "is_blocked": row[4],
-            "created_at": row[5]
+            "referrer_id": row[4],
+            "is_blocked": row[5],
+            "created_at": row[6]
         }
     return None
 
-def create_user(user_id: int, username=None, first_name=None):
+def create_user(user_id: int, username=None, first_name=None, referrer_id=None):
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
+    c.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
+    if c.fetchone():
+        conn.close()
+        return
     c.execute(
-        "INSERT OR IGNORE INTO users (user_id, username, first_name) VALUES (?, ?, ?)",
-        (user_id, username, first_name)
+        "INSERT INTO users (user_id, username, first_name, referrer_id) VALUES (?, ?, ?, ?)",
+        (user_id, username, first_name, referrer_id)
     )
+    if referrer_id:
+        # Give bonus to referrer
+        if update_balance(referrer_id, REFERRAL_BONUS):
+            add_transaction(None, referrer_id, REFERRAL_BONUS, "referral", f"پاداش معرفی کاربر {user_id}")
+            c.execute(
+                "INSERT INTO referrals (referrer_id, referred_id, bonus) VALUES (?, ?, ?)",
+                (referrer_id, user_id, REFERRAL_BONUS)
+            )
     conn.commit()
     conn.close()
 
@@ -193,10 +214,16 @@ def get_user_name(user_id: int) -> str:
         return user["first_name"] or user["username"] or str(user_id)
     return str(user_id)
 
-# ============ START & BALANCE ============
+# ===== START & REFERRAL =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    create_user(user.id, user.username, user.first_name)
+    args = context.args
+    referrer_id = None
+    if args and args[0].isdigit():
+        referrer_id = int(args[0])
+        if referrer_id == user.id:
+            referrer_id = None
+    create_user(user.id, user.username, user.first_name, referrer_id)
     if is_blocked(user.id):
         await update.message.reply_text("⛔ شما مسدود شده‌اید.")
         return
@@ -205,15 +232,44 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("💳 شارژ", callback_data="deposit")],
         [InlineKeyboardButton("🏧 برداشت", callback_data="withdraw")],
         [InlineKeyboardButton("🎮 بازی‌ها", callback_data="games")],
+        [InlineKeyboardButton("👥 زیرمجموعه", callback_data="referrals")],
     ]
     await update.message.reply_text(
         "🎮 به ربات بازی‌های گروهی خوش آمدید!\n\n"
         "برای شروع بازی در گروه:\n`1 تاس 0.1` یا `1 بولینگ 0.1` و ...\n\n"
         "💰 موجودی: `موجودی` یا `موجودی من`\n"
-        "💸 انتقال: روی پیام فرد Reply کنید و بنویسید `انتقال 0.1`",
+        "💸 انتقال: روی پیام فرد Reply کنید و بنویسید `انتقال 0.1`\n"
+        "👥 لینک معرفی: /referral",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
+async def referral_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    link = f"https://t.me/{context.bot.username}?start={user.id}"
+    await update.message.reply_text(
+        f"👥 لینک معرفی شما:\n`{link}`\n\n"
+        "به ازای هر کاربر جدید که از این لینک وارد شود، 0.05 TRX به موجودی شما اضافه می‌شود."
+    )
+
+async def referrals_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    conn = sqlite3.connect(DATABASE)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id = ?", (user_id,))
+    count = c.fetchone()[0]
+    c.execute("SELECT SUM(bonus) FROM referrals WHERE referrer_id = ?", (user_id,))
+    total_bonus = c.fetchone()[0] or 0
+    conn.close()
+    await query.edit_message_text(
+        f"👥 زیرمجموعه‌های شما:\n"
+        f"تعداد: {count}\n"
+        f"جمع پاداش: {format_amount(total_bonus)} TRX\n\n"
+        f"لینک معرفی: `https://t.me/{context.bot.username}?start={user_id}`"
+    )
+
+# ===== BALANCE & TRANSFER =====
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if is_blocked(user.id):
@@ -226,7 +282,6 @@ async def balance_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text.strip() in ["موجودی", "موجودی من"]:
         await balance_command(update, context)
 
-# ============ TRANSFER ============
 async def transfer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if is_blocked(user.id):
@@ -259,7 +314,7 @@ async def transfer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ انتقال {format_amount(amount)} TRX از {user.full_name} به {receiver.full_name} انجام شد."
     )
 
-# ============ GAME HANDLERS ============
+# ===== GAME HANDLERS =====
 async def game_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if is_blocked(user.id):
@@ -277,7 +332,7 @@ async def game_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if get_balance(user.id) < bet:
         await update.message.reply_text(f"❌ موجودی کافی نیست. موجودی: {format_amount(get_balance(user.id))} TRX")
         return
-    # Deduct bet from creator
+    # Deduct bet from creator (will be returned if cancelled)
     if not update_balance(user.id, -bet):
         await update.message.reply_text("❌ خطا در کسر موجودی.")
         return
@@ -320,6 +375,7 @@ async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         add_transaction(None, user.id, data["bet"], "game", "بازگشت شرط به دلیل لغو")
         await query.edit_message_text("❌ بازی لغو شد.")
         return
+
     # Create game session
     session = {
         "creator": user.id,
@@ -330,23 +386,28 @@ async def game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "scores": [],
         "current": 0,
         "finished": False,
-        "paid": {user.id: True}
+        "paid": {user.id: True},
+        "game_message_id": query.message.message_id,
     }
     active_games[chat_id] = session
+
     if query.data == "game_bot":
         global bot_busy
         if bot_busy:
             await query.edit_message_text("🤖 ربات در حال بازی است، لطفاً بعداً تلاش کنید.")
+            # Refund bet
+            update_balance(user.id, data["bet"])
+            add_transaction(None, user.id, data["bet"], "game", "بازگشت شرط به دلیل مشغول بودن ربات")
             return
         bot_busy = True
         session["players"].append(None)  # placeholder for bot
         await query.edit_message_text(
-            "🤖 بازی با ربات شروع شد.\nنوبت شماست، پرتاب کنید.",
+            "🤖 بازی با ربات شروع شد.\nنوبت شماست، روی دکمه زیر کلیک کنید تا تاس بیندازید.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎲 پرتاب", callback_data="roll")]])
         )
     else:
         await query.edit_message_text(
-            "👥 بازی با دوستان شروع شد.\nنوبت شماست، پرتاب کنید.\n(بازیکن دوم بعداً می‌تواند بپیوندد)",
+            "👥 بازی با دوستان شروع شد.\nنوبت شماست، روی دکمه زیر کلیک کنید تا تاس بیندازید.\n(بازیکن دوم بعداً می‌تواند بپیوندد)",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎲 پرتاب", callback_data="roll")]])
         )
 
@@ -362,6 +423,7 @@ async def roll_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not session or session["finished"]:
         await query.edit_message_text("⏳ بازی فعالی یافت نشد.")
         return
+
     # Friends: allow second player to join
     if session["mode"] == "friends" and len(session["players"]) == 1 and user.id != session["players"][0]:
         session["players"].append(user.id)
@@ -373,10 +435,11 @@ async def roll_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session["paid"][user.id] = True
         add_transaction(user.id, None, session["bet"], "game", f"شرط {session['game_type']} با دوستان")
         await query.edit_message_text(
-            f"👤 {get_user_name(user.id)} به بازی پیوست!\nنوبت شماست، پرتاب کنید.",
+            f"👤 {get_user_name(user.id)} به بازی پیوست!\nنوبت شماست، روی دکمه زیر کلیک کنید تا تاس بیندازید.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎲 پرتاب", callback_data="roll")]])
         )
         return
+
     # Check turn
     if session["mode"] == "friends":
         if len(session["players"]) < 2:
@@ -395,15 +458,22 @@ async def roll_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if session["current"] == 0 and session["players"][0] != user.id:
             await query.answer("❌ نوبت شما نیست.", show_alert=True)
             return
-    # Roll dice
+
+    # Roll dice using bot's send_dice
     emoji = GAME_EMOJIS[session["game_type"]]
-    dice = await context.bot.send_dice(chat_id=chat_id, emoji=emoji)
-    value = dice.dice.value
+    dice_msg = await context.bot.send_dice(chat_id=chat_id, emoji=emoji)
+    value = dice_msg.dice.value
     session["scores"].append(value)
+
+    # Update status message
     if session["mode"] == "bot" and session["current"] == 0:
         session["current"] = 1
-        await query.edit_message_text(f"🎲 شما: {value}\nنوبت ربات...", reply_markup=None)
-        context.job_queue.run_once(bot_roll, 1.5, context=chat_id)
+        await query.edit_message_text(
+            f"🎲 شما: {value}\nنوبت ربات...",
+            reply_markup=None
+        )
+        # Schedule bot roll after 2 seconds
+        context.job_queue.run_once(bot_roll, 2.0, context=chat_id)
     else:
         if session["mode"] == "friends":
             session["current"] += 1
@@ -415,7 +485,8 @@ async def roll_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"🎲 {get_user_name(user.id)}: {value}\nنوبت {get_user_name(next_player)}",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎲 پرتاب", callback_data="roll")]])
                 )
-        else:  # bot roll
+        else:
+            # bot already rolled, now finish
             await finish_game(chat_id, context)
 
 async def bot_roll(context: ContextTypes.DEFAULT_TYPE):
@@ -426,8 +497,8 @@ async def bot_roll(context: ContextTypes.DEFAULT_TYPE):
         bot_busy = False
         return
     emoji = GAME_EMOJIS[session["game_type"]]
-    dice = await context.bot.send_dice(chat_id=chat_id, emoji=emoji)
-    value = dice.dice.value
+    dice_msg = await context.bot.send_dice(chat_id=chat_id, emoji=emoji)
+    value = dice_msg.dice.value
     session["scores"].append(value)
     await finish_game(chat_id, context)
 
@@ -503,7 +574,7 @@ async def finish_game(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
         global bot_busy
         bot_busy = False
 
-# ============ DEPOSIT FLOW ============
+# ===== DEPOSIT FLOW =====
 async def deposit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if is_blocked(user.id):
@@ -536,7 +607,6 @@ async def deposit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"❌ حداقل مبلغ {DEPOSIT_MIN} TRX است.")
             return
         context.user_data["deposit_amount"] = amount
-        # Show payment methods
         keyboard = [
             [InlineKeyboardButton("💎 TON", callback_data="dep_method_ton")],
             [InlineKeyboardButton("💳 کارت بانکی", callback_data="dep_method_card")],
@@ -656,7 +726,7 @@ async def deposit_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("deposit_method", None)
     return ConversationHandler.END
 
-# ============ OWNER CONFIRM DEPOSIT ============
+# ===== OWNER CONFIRM DEPOSIT =====
 async def deposit_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -733,7 +803,7 @@ async def deposit_owner_amount(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("❌ خطا در افزایش موجودی.")
     return ConversationHandler.END
 
-# ============ WITHDRAW FLOW ============
+# ===== WITHDRAW FLOW =====
 async def withdraw_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if is_blocked(user.id):
@@ -876,7 +946,7 @@ async def withdraw_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("withdraw_method", None)
     return ConversationHandler.END
 
-# ============ OWNER CONFIRM WITHDRAW ============
+# ===== OWNER CONFIRM WITHDRAW =====
 async def withdraw_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -956,7 +1026,7 @@ async def withdraw_owner_amount(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("❌ خطا در کاهش موجودی.")
     return ConversationHandler.END
 
-# ============ ADMIN PANEL ============
+# ===== ADMIN PANEL =====
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id != OWNER_ID:
@@ -1155,7 +1225,7 @@ async def admin_get_user_id_block(update: Update, context: ContextTypes.DEFAULT_
     await admin_command(update, context)
     return ConversationHandler.END
 
-# ============ MAIN MENU CALLBACK ============
+# ===== MAIN MENU CALLBACK =====
 async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1172,26 +1242,23 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "برای شروع بازی، در گروه پیام `1 تاس 0.1` ارسال کنید.\n"
             "بازی‌های موجود: تاس، بولینگ، دارت، بسکتبال"
         )
+    elif data == "referrals":
+        await referrals_menu(update, context)
     else:
         await query.edit_message_text("گزینه نامعتبر.")
 
-# ============ ERROR HANDLER ============
+# ===== ERROR HANDLER =====
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logging.error(f"Update {update} caused error {context.error}")
-    # If error during bot game, release busy flag
-    if context.error and "chat_id" in str(context.error):
-        try:
-            chat_id = int(str(context.error).split("chat_id=")[1].split()[0])
-        except:
-            chat_id = None
-        if chat_id and chat_id in active_games:
-            session = active_games.get(chat_id)
-            if session and session["mode"] == "bot":
-                global bot_busy
-                bot_busy = False
-                del active_games[chat_id]
+    # Release bot_busy if any error occurs during bot game
+    global bot_busy
+    bot_busy = False
+    # Optionally clean up active games
+    for chat_id, session in list(active_games.items()):
+        if session["mode"] == "bot" and not session["finished"]:
+            del active_games[chat_id]
 
-# ============ MAIN ============
+# ===== MAIN =====
 def main():
     init_db()
     logging.basicConfig(level=logging.INFO)
@@ -1200,6 +1267,7 @@ def main():
 
     # Commands
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("referral", referral_command))
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CommandHandler("deposit", deposit_start))
     app.add_handler(CommandHandler("withdraw", withdraw_start))
@@ -1212,7 +1280,7 @@ def main():
     # Callback handlers
     app.add_handler(CallbackQueryHandler(game_callback, pattern="^game_"))
     app.add_handler(CallbackQueryHandler(roll_callback, pattern="^roll$"))
-    app.add_handler(CallbackQueryHandler(main_menu_callback, pattern="^(balance|deposit|withdraw|games)$"))
+    app.add_handler(CallbackQueryHandler(main_menu_callback, pattern="^(balance|deposit|withdraw|games|referrals)$"))
 
     # Deposit conversation
     deposit_conv = ConversationHandler(
@@ -1220,9 +1288,7 @@ def main():
         states={
             DEPOSIT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, deposit_amount_input)],
             DEPOSIT_METHOD: [CallbackQueryHandler(deposit_method_callback, pattern="^dep_method_")],
-            DEPOSIT_PROOF: [
-                MessageHandler(filters.PHOTO | filters.TEXT, deposit_proof),
-            ],
+            DEPOSIT_PROOF: [MessageHandler(filters.PHOTO | filters.TEXT, deposit_proof)],
         },
         fallbacks=[CommandHandler("cancel", lambda u,c: c.bot.send_message(u.effective_chat.id, "لغو شد."))],
         allow_reentry=True,
