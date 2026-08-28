@@ -1,26 +1,22 @@
 # ============================================================
-# BOT.PY - STABLE TELEGRAM GAME BOT
+# BOT.PY - Telegram Games Bot
 # Python 3.10+
 # python-telegram-bot 20+
 #
-# امکانات:
-# - موجودی بدون موجودی اولیه
-# - واحد نمایش TRX
-# - بازی تاس / بولینگ / بسکتبال / دارت
-# - تعداد بازی نامحدود
-# - بازی با دوستان
-# - بازی با ربات
-# - قفل تراکنش
-# - ضد دوباره کم شدن موجودی
-# - ضد گیر کردن بازی
-# - بازی با ربات: کاربر خودش پرتاب می‌کند، ربات خودش پرتاب می‌کند
-# - نتیجه بعد از کامل شدن پرتاب‌ها
-# - انتقال با Reply
-# - درخواست
-# - پنل ادمین
-# - جوین اجباری
-# - سیستم زیرمجموعه 0.05 TRX
-# - بازی‌ها و موجودی در SQLite
+# Features:
+# - Dice / Bowling / Basketball / Darts
+# - Unlimited rounds
+# - Play vs Bot
+# - Play vs Friend
+# - Atomic balance operations
+# - Game locking
+# - Recovery for unfinished games
+# - Reply transfer
+# - Balance in groups
+# - Referral system: 0.05 internal game credit
+# - Mandatory membership: @zobxt
+# - Bot errors do NOT stop polling
+# - No initial balance
 # ============================================================
 
 import os
@@ -30,6 +26,7 @@ import logging
 import asyncio
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from contextlib import closing
+from datetime import datetime
 
 from telegram import (
     Update,
@@ -38,13 +35,7 @@ from telegram import (
     InlineKeyboardButton,
 )
 from telegram.constants import ChatType
-from telegram.error import (
-    TelegramError,
-    Forbidden,
-    BadRequest,
-    NetworkError,
-    TimedOut,
-)
+from telegram.error import TelegramError, BadRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -66,33 +57,35 @@ ADMIN_IDS = {
 
 DB_FILE = "bot.db"
 
-FORCE_JOIN_CHANNEL = "@zobxt"
-FORCE_JOIN_LINK = "https://t.me/zobxt"
+CHANNEL_USERNAME = "@zobxt"
+CHANNEL_LINK = "https://t.me/zobxt"
 
 MIN_GAME = Decimal("0.01")
 MAX_GAME = Decimal("1000000000")
 
-OWNER_SHARE = Decimal("0.02")
-BOT_FEE = Decimal("0.03")
 REFERRAL_REWARD = Decimal("0.05")
 
-WINNER_PAYOUT = Decimal("0.95")
+# درصدهای تسویه داخلی بازی
+OWNER_SHARE = Decimal("0.02")
+BOT_FEE = Decimal("0.03")
+WINNER_PAYOUT_RATE = Decimal("0.95")
 
-WITHDRAW_ENABLED_DEFAULT = 1
+STALE_GAME_HOURS = 24
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
-logger = logging.getLogger("game_bot")
+logger = logging.getLogger("games_bot")
 
+# قفل سراسری برای عملیات حساس
 DB_LOCK = asyncio.Lock()
 
-# جلوگیری از اجرای همزمان دو فرآیند پرتاب برای یک بازی
+# قفل جداگانه برای هر بازی
 GAME_LOCKS = {}
-
 GAME_LOCKS_GUARD = asyncio.Lock()
+
 
 # ============================================================
 # GAME CONFIG
@@ -128,6 +121,14 @@ GAME_EMOJIS = {
     "darts": "🎯",
 }
 
+GAME_MAX = {
+    "dice": 6,
+    "bowling": 6,
+    "basketball": 5,
+    "darts": 6,
+}
+
+
 # ============================================================
 # DATABASE
 # ============================================================
@@ -136,7 +137,7 @@ def db():
     con = sqlite3.connect(
         DB_FILE,
         timeout=30,
-        isolation_level=None
+        isolation_level=None,
     )
     con.row_factory = sqlite3.Row
     return con
@@ -155,7 +156,7 @@ def init_db():
             first_name TEXT DEFAULT '',
             balance TEXT DEFAULT '0',
             blocked INTEGER DEFAULT 0,
-            referrer_id INTEGER DEFAULT NULL,
+            referred_by INTEGER DEFAULT NULL,
             referral_paid INTEGER DEFAULT 0,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
@@ -171,9 +172,9 @@ def init_db():
         con.execute("""
         CREATE TABLE IF NOT EXISTS transfers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sender_id INTEGER,
-            receiver_id INTEGER,
-            amount TEXT,
+            sender_id INTEGER NOT NULL,
+            receiver_id INTEGER NOT NULL,
+            amount TEXT NOT NULL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
         """)
@@ -181,8 +182,8 @@ def init_db():
         con.execute("""
         CREATE TABLE IF NOT EXISTS requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            amount TEXT,
+            user_id INTEGER NOT NULL,
+            amount TEXT NOT NULL,
             wallet TEXT DEFAULT '',
             status TEXT DEFAULT 'pending',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -192,18 +193,20 @@ def init_db():
         con.execute("""
         CREATE TABLE IF NOT EXISTS games (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER,
+            chat_id INTEGER NOT NULL,
             message_id INTEGER DEFAULT 0,
-            creator_id INTEGER,
-            opponent_id INTEGER,
-            game_type TEXT,
-            amount TEXT,
-            rounds INTEGER,
+            creator_id INTEGER NOT NULL,
+            opponent_id INTEGER DEFAULT NULL,
+            game_type TEXT NOT NULL,
+            amount TEXT NOT NULL,
+            rounds INTEGER NOT NULL,
             creator_rolls TEXT DEFAULT '',
             opponent_rolls TEXT DEFAULT '',
             status TEXT DEFAULT 'waiting',
             winner_id INTEGER DEFAULT NULL,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            settled INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
         """)
 
@@ -211,45 +214,71 @@ def init_db():
         CREATE TABLE IF NOT EXISTS house (
             id INTEGER PRIMARY KEY CHECK(id=1),
             owner_balance TEXT DEFAULT '0',
-            fee_balance TEXT DEFAULT '0'
+            fee_balance TEXT DEFAULT '0',
+            bot_balance TEXT DEFAULT '0'
         )
         """)
 
         con.execute("""
         INSERT OR IGNORE INTO house
-        (id, owner_balance, fee_balance)
-        VALUES (1, '0', '0')
+        (id, owner_balance, fee_balance, bot_balance)
+        VALUES (1, '0', '0', '0')
         """)
 
         con.execute("""
-        INSERT OR IGNORE INTO settings
-        (key, value)
+        INSERT OR IGNORE INTO settings(key, value)
         VALUES ('withdraw_enabled', '1')
         """)
 
-        # migrations
-        user_columns = {
+        # ----------------------------------------------------
+        # Migration
+        # ----------------------------------------------------
+
+        columns = {
             row["name"]
             for row in con.execute(
                 "PRAGMA table_info(users)"
             ).fetchall()
         }
 
-        if "referrer_id" not in user_columns:
-            con.execute(
-                "ALTER TABLE users ADD COLUMN referrer_id INTEGER DEFAULT NULL"
-            )
+        migrations = {
+            "balance": "ALTER TABLE users ADD COLUMN balance TEXT DEFAULT '0'",
+            "blocked": "ALTER TABLE users ADD COLUMN blocked INTEGER DEFAULT 0",
+            "referred_by": "ALTER TABLE users ADD COLUMN referred_by INTEGER DEFAULT NULL",
+            "referral_paid": "ALTER TABLE users ADD COLUMN referral_paid INTEGER DEFAULT 0",
+        }
 
-        if "referral_paid" not in user_columns:
-            con.execute(
-                "ALTER TABLE users ADD COLUMN referral_paid INTEGER DEFAULT 0"
-            )
+        for column, sql in migrations.items():
+            if column not in columns:
+                try:
+                    con.execute(sql)
+                except Exception:
+                    logger.exception("Migration failed: %s", column)
+
+        game_columns = {
+            row["name"]
+            for row in con.execute(
+                "PRAGMA table_info(games)"
+            ).fetchall()
+        }
+
+        game_migrations = {
+            "settled": "ALTER TABLE games ADD COLUMN settled INTEGER DEFAULT 0",
+            "updated_at": "ALTER TABLE games ADD COLUMN updated_at TEXT DEFAULT CURRENT_TIMESTAMP",
+        }
+
+        for column, sql in game_migrations.items():
+            if column not in game_columns:
+                try:
+                    con.execute(sql)
+                except Exception:
+                    logger.exception("Game migration failed: %s", column)
 
         con.commit()
 
 
 # ============================================================
-# DECIMAL
+# DECIMAL HELPERS
 # ============================================================
 
 def D(value):
@@ -283,18 +312,44 @@ def normalize_digits(text):
     return text.translate(table)
 
 
+def parse_decimal_amount(text):
+    if not text:
+        return None
+
+    text = normalize_digits(text)
+    text = text.strip()
+    text = text.replace("٬", "")
+    text = text.replace(",", ".")
+
+    try:
+        value = Decimal(text)
+    except InvalidOperation:
+        return None
+
+    if value < MIN_GAME:
+        return None
+
+    if value > MAX_GAME:
+        return None
+
+    return value.quantize(
+        Decimal("0.01"),
+        rounding=ROUND_DOWN
+    )
+
+
 # ============================================================
 # USERS
 # ============================================================
 
-def ensure_user(user, referrer_id=None):
+def ensure_user(user):
     if not user:
         return
 
     with closing(db()) as con:
 
         row = con.execute(
-            "SELECT * FROM users WHERE user_id=?",
+            "SELECT user_id FROM users WHERE user_id=?",
             (user.id,)
         ).fetchone()
 
@@ -313,34 +368,15 @@ def ensure_user(user, referrer_id=None):
 
         else:
 
-            valid_ref = None
-
-            if referrer_id:
-                try:
-                    referrer_id = int(referrer_id)
-
-                    if referrer_id != user.id:
-                        exists = con.execute(
-                            "SELECT user_id FROM users WHERE user_id=?",
-                            (referrer_id,)
-                        ).fetchone()
-
-                        if exists:
-                            valid_ref = referrer_id
-
-                except Exception:
-                    valid_ref = None
-
+            # بدون موجودی اولیه
             con.execute("""
             INSERT INTO users
-            (user_id, username, first_name, balance,
-             referrer_id, referral_paid)
-            VALUES (?, ?, ?, '0', ?, 0)
+            (user_id, username, first_name, balance)
+            VALUES (?, ?, ?, '0')
             """, (
                 user.id,
                 user.username or "",
-                user.first_name or "",
-                valid_ref
+                user.first_name or ""
             ))
 
         con.commit()
@@ -363,14 +399,23 @@ def get_balance(user_id):
     return D(row["balance"])
 
 
+def is_blocked(user_id):
+    row = get_user(user_id)
+    return bool(row and int(row["blocked"]) == 1)
+
+
+def is_admin(user_id):
+    return user_id in ADMIN_IDS
+
+
 def name_of(user):
     if not user:
         return "کاربر"
 
-    if user.first_name:
+    if getattr(user, "first_name", None):
         return user.first_name
 
-    if user.username:
+    if getattr(user, "username", None):
         return "@" + user.username
 
     return str(user.id)
@@ -418,7 +463,6 @@ def debit_balance(user_id, amount):
             ))
 
             con.execute("COMMIT")
-
             return True
 
         except Exception:
@@ -427,7 +471,7 @@ def debit_balance(user_id, amount):
             except Exception:
                 pass
 
-            logger.exception("DEBIT ERROR")
+            logger.exception("Debit failed")
             return False
 
 
@@ -452,7 +496,6 @@ def credit_balance(user_id, amount):
                 return False
 
             current = D(row["balance"])
-
             new_balance = current + amount
 
             con.execute("""
@@ -465,7 +508,6 @@ def credit_balance(user_id, amount):
             ))
 
             con.execute("COMMIT")
-
             return True
 
         except Exception:
@@ -474,42 +516,73 @@ def credit_balance(user_id, amount):
             except Exception:
                 pass
 
-            logger.exception("CREDIT ERROR")
+            logger.exception("Credit failed")
             return False
 
 
-# ============================================================
-# HOUSE
-# ============================================================
+def transfer_atomic(sender_id, receiver_id, amount):
+    amount = D(amount)
 
-def add_house(owner_amount, fee_amount):
-    owner_amount = D(owner_amount)
-    fee_amount = D(fee_amount)
+    if amount <= 0 or sender_id == receiver_id:
+        return False
 
     with closing(db()) as con:
 
         try:
             con.execute("BEGIN IMMEDIATE")
 
-            row = con.execute(
-                "SELECT owner_balance, fee_balance "
-                "FROM house WHERE id=1"
+            sender = con.execute(
+                "SELECT balance FROM users WHERE user_id=?",
+                (sender_id,)
             ).fetchone()
 
-            owner = D(row["owner_balance"])
-            fee = D(row["fee_balance"])
+            receiver = con.execute(
+                "SELECT balance FROM users WHERE user_id=?",
+                (receiver_id,)
+            ).fetchone()
+
+            if not sender or not receiver:
+                con.execute("ROLLBACK")
+                return False
+
+            sender_balance = D(sender["balance"])
+
+            if sender_balance < amount:
+                con.execute("ROLLBACK")
+                return False
 
             con.execute("""
-            UPDATE house
-            SET owner_balance=?,
-                fee_balance=?
-            WHERE id=1
+            UPDATE users
+            SET balance=?
+            WHERE user_id=?
             """, (
-                str(owner + owner_amount),
-                str(fee + fee_amount)
+                str(sender_balance - amount),
+                sender_id
+            ))
+
+            receiver_balance = D(receiver["balance"])
+
+            con.execute("""
+            UPDATE users
+            SET balance=?
+            WHERE user_id=?
+            """, (
+                str(receiver_balance + amount),
+                receiver_id
+            ))
+
+            con.execute("""
+            INSERT INTO transfers
+            (sender_id, receiver_id, amount)
+            VALUES (?, ?, ?)
+            """, (
+                sender_id,
+                receiver_id,
+                str(amount)
             ))
 
             con.execute("COMMIT")
+            return True
 
         except Exception:
             try:
@@ -517,7 +590,59 @@ def add_house(owner_amount, fee_amount):
             except Exception:
                 pass
 
-            logger.exception("HOUSE ERROR")
+            logger.exception("Transfer failed")
+            return False
+
+
+# ============================================================
+# HOUSE
+# ============================================================
+
+def add_house(owner_amount=0, fee_amount=0, bot_amount=0):
+    owner_amount = D(owner_amount)
+    fee_amount = D(fee_amount)
+    bot_amount = D(bot_amount)
+
+    with closing(db()) as con:
+
+        try:
+            con.execute("BEGIN IMMEDIATE")
+
+            row = con.execute("""
+            SELECT owner_balance,
+                   fee_balance,
+                   bot_balance
+            FROM house
+            WHERE id=1
+            """).fetchone()
+
+            owner = D(row["owner_balance"])
+            fee = D(row["fee_balance"])
+            bot = D(row["bot_balance"])
+
+            con.execute("""
+            UPDATE house
+            SET owner_balance=?,
+                fee_balance=?,
+                bot_balance=?
+            WHERE id=1
+            """, (
+                str(owner + owner_amount),
+                str(fee + fee_amount),
+                str(bot + bot_amount)
+            ))
+
+            con.execute("COMMIT")
+            return True
+
+        except Exception:
+            try:
+                con.execute("ROLLBACK")
+            except Exception:
+                pass
+
+            logger.exception("House update failed")
+            return False
 
 
 # ============================================================
@@ -526,6 +651,7 @@ def add_house(owner_amount, fee_amount):
 
 def get_setting(key, default=""):
     with closing(db()) as con:
+
         row = con.execute(
             "SELECT value FROM settings WHERE key=?",
             (key,)
@@ -553,62 +679,56 @@ def set_setting(key, value):
         con.commit()
 
 
-def withdraw_enabled():
-    return get_setting(
-        "withdraw_enabled",
-        "1"
-    ) == "1"
-
-
-def is_admin(user_id):
-    return user_id in ADMIN_IDS
-
-
-def is_blocked(user_id):
-    row = get_user(user_id)
-
-    return bool(
-        row and
-        int(row["blocked"]) == 1
-    )
-
-
 # ============================================================
-# FORCE JOIN
+# FORCED JOIN
 # ============================================================
 
-async def check_joined(bot, user_id):
+async def check_membership(bot, user_id):
     try:
-
         member = await bot.get_chat_member(
-            FORCE_JOIN_CHANNEL,
+            CHANNEL_USERNAME,
             user_id
         )
 
         return member.status in (
             "creator",
             "administrator",
-            "member"
+            "member",
         )
 
-    except Exception as e:
-
+    except TelegramError as e:
         logger.warning(
-            "JOIN CHECK ERROR %s",
+            "Membership check failed: %s",
             e
         )
 
-        # اگر کانال درست تنظیم نشده باشد،
-        # کل ربات قفل نمی‌شود.
+        # اگر بات ادمین کانال نباشد، اجازه عبور می‌دهیم
+        # تا کل ربات از کار نیفتد.
         return True
 
 
-async def force_join_message(update, context):
+async def require_join(update, context):
+    user = update.effective_user
+
+    if not user:
+        return False
+
+    if is_admin(user.id):
+        return True
+
+    ok = await check_membership(
+        context.bot,
+        user.id
+    )
+
+    if ok:
+        return True
+
     keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
                 "📢 عضویت در کانال",
-                url=FORCE_JOIN_LINK
+                url=CHANNEL_LINK
             )
         ],
         [
@@ -619,65 +739,251 @@ async def force_join_message(update, context):
         ]
     ])
 
-    await update.effective_message.reply_text(
-        "⛔ برای استفاده از ربات ابتدا عضو کانال شو.",
-        reply_markup=keyboard
-    )
-
-
-async def check_access(update, context):
-    user = update.effective_user
-
-    if not user:
-        return False
-
-    if is_admin(user.id):
-        return True
-
-    joined = await check_joined(
-        context.bot,
-        user.id
-    )
-
-    if not joined:
-        await force_join_message(
-            update,
-            context
+    try:
+        await update.effective_message.reply_text(
+            "⛔ برای استفاده از ربات ابتدا در کانال زیر عضو شو:\n\n"
+            f"{CHANNEL_LINK}\n\n"
+            "بعد روی «بررسی عضویت» بزن.",
+            reply_markup=keyboard
         )
-        return False
+    except Exception:
+        logger.exception("Join message failed")
 
-    return True
+    return False
+
+
+# ============================================================
+# REFERRAL
+# ============================================================
+
+async def process_referral(user, referrer_id):
+    if not user:
+        return
+
+    if not referrer_id:
+        return
+
+    try:
+        referrer_id = int(referrer_id)
+    except Exception:
+        return
+
+    if referrer_id == user.id:
+        return
+
+    ensure_user(user)
+
+    async with DB_LOCK:
+
+        with closing(db()) as con:
+
+            try:
+                con.execute("BEGIN IMMEDIATE")
+
+                target = con.execute("""
+                SELECT referred_by
+                FROM users
+                WHERE user_id=?
+                """, (
+                    user.id,
+                )).fetchone()
+
+                referrer = con.execute("""
+                SELECT user_id
+                FROM users
+                WHERE user_id=?
+                """, (
+                    referrer_id,
+                )).fetchone()
+
+                if not target or not referrer:
+                    con.execute("ROLLBACK")
+                    return
+
+                if target["referred_by"] is not None:
+                    con.execute("ROLLBACK")
+                    return
+
+                con.execute("""
+                UPDATE users
+                SET referred_by=?
+                WHERE user_id=?
+                """, (
+                    referrer_id,
+                    user.id
+                ))
+
+                ref_balance = con.execute("""
+                SELECT balance
+                FROM users
+                WHERE user_id=?
+                """, (
+                    referrer_id,
+                )).fetchone()
+
+                current = D(ref_balance["balance"])
+
+                con.execute("""
+                UPDATE users
+                SET balance=?
+                WHERE user_id=?
+                """, (
+                    str(current + REFERRAL_REWARD),
+                    referrer_id
+                ))
+
+                con.execute("COMMIT")
+
+            except Exception:
+                try:
+                    con.execute("ROLLBACK")
+                except Exception:
+                    pass
+
+                logger.exception("Referral error")
+
+
+# ============================================================
+# KEYBOARDS
+# ============================================================
+
+def main_keyboard():
+    return ReplyKeyboardMarkup(
+        [
+            ["💰 موجودی", "🎮 بازی"],
+            ["👥 بازی با دوستان", "🤖 بازی با ربات"],
+            ["💸 انتقال", "📤 درخواست"],
+            ["👥 زیرمجموعه", "📖 راهنما"],
+        ],
+        resize_keyboard=True
+    )
+
+
+def game_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🎲 تاس",
+                callback_data="help_game_dice"
+            ),
+            InlineKeyboardButton(
+                "🎳 بولینگ",
+                callback_data="help_game_bowling"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🏀 بسکتبال",
+                callback_data="help_game_basketball"
+            ),
+            InlineKeyboardButton(
+                "🎯 دارت",
+                callback_data="help_game_darts"
+            ),
+        ],
+    ])
+
+
+def created_game_keyboard(game_id):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "👥 بازی با دوستان",
+                callback_data=f"join_{game_id}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🤖 بازی با ربات",
+                callback_data=f"bot_{game_id}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "❌ لغو بازی",
+                callback_data=f"cancel_{game_id}"
+            )
+        ],
+    ])
+
+
+# ============================================================
+# GAME LOCK
+# ============================================================
+
+async def get_game_lock(game_id):
+    async with GAME_LOCKS_GUARD:
+
+        lock = GAME_LOCKS.get(game_id)
+
+        if lock is None:
+            lock = asyncio.Lock()
+            GAME_LOCKS[game_id] = lock
+
+        return lock
+
+
+async def remove_game_lock(game_id):
+    async with GAME_LOCKS_GUARD:
+        GAME_LOCKS.pop(game_id, None)
+
+
+# ============================================================
+# GAME DB HELPERS
+# ============================================================
+
+def get_game(game_id):
+    with closing(db()) as con:
+        return con.execute(
+            "SELECT * FROM games WHERE id=?",
+            (game_id,)
+        ).fetchone()
+
+
+def parse_rolls(value):
+    if not value:
+        return []
+
+    result = []
+
+    for item in value.split(","):
+        item = item.strip()
+
+        if not item:
+            continue
+
+        try:
+            result.append(int(item))
+        except ValueError:
+            continue
+
+    return result
+
+
+def rolls_text(rolls):
+    return ",".join(
+        str(int(x))
+        for x in rolls
+    )
+
+
+def calculate_score(rolls):
+    return sum(int(x) for x in rolls)
+
+
+def winner_from_scores(a, b):
+    if a > b:
+        return 1
+
+    if b > a:
+        return 2
+
+    return 0
 
 
 # ============================================================
 # PARSERS
 # ============================================================
-
-def parse_decimal_amount(text):
-    if not text:
-        return None
-
-    text = normalize_digits(text)
-    text = text.replace("٬", "")
-    text = text.replace(",", ".")
-    text = text.strip()
-
-    try:
-        value = Decimal(text)
-    except InvalidOperation:
-        return None
-
-    if value < MIN_GAME:
-        return None
-
-    if value > MAX_GAME:
-        return None
-
-    return value.quantize(
-        Decimal("0.01"),
-        rounding=ROUND_DOWN
-    )
-
 
 def parse_amount_from_command(text):
     text = normalize_digits(text or "")
@@ -697,8 +1003,14 @@ def parse_amount_from_command(text):
 
 
 def parse_game(text):
-    text = normalize_digits(text or "").strip()
+    text = normalize_digits(
+        text or ""
+    ).strip()
 
+    # پشتیبانی:
+    # 1 تاس 0.5
+    # 10 بولینگ 1
+    # 100 بسکتبال 2
     pattern = re.compile(
         r"^(\d+)\s+([^\s]+)\s+(\d+(?:[.,]\d+)?)$",
         re.IGNORECASE
@@ -709,87 +1021,29 @@ def parse_game(text):
     if not match:
         return None
 
-    rounds = int(match.group(1))
+    try:
+        rounds = int(match.group(1))
+    except Exception:
+        return None
+
     game_name = match.group(2).lower()
+
+    game = GAME_NAMES.get(game_name)
+
+    if not game:
+        return None
 
     amount = parse_decimal_amount(
         match.group(3)
     )
 
-    game = GAME_NAMES.get(game_name)
-
-    if not game or not amount:
+    if amount is None:
         return None
 
     if rounds < 1:
         return None
 
-    # عمداً هیچ سقفی برای تعداد پرتاب گذاشته نشده.
     return game, rounds, amount
-
-
-# ============================================================
-# KEYBOARDS
-# ============================================================
-
-def user_keyboard():
-    return ReplyKeyboardMarkup(
-        [
-            ["💰 موجودی", "🎮 بازی"],
-            ["👥 بازی با دوستان", "🤖 بازی با ربات"],
-            ["💸 انتقال", "📤 درخواست"],
-            ["📖 راهنما"]
-        ],
-        resize_keyboard=True
-    )
-
-
-def game_keyboard():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "🎲 تاس",
-                callback_data="game_dice"
-            ),
-            InlineKeyboardButton(
-                "🎳 بولینگ",
-                callback_data="game_bowling"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🏀 بسکتبال",
-                callback_data="game_basketball"
-            ),
-            InlineKeyboardButton(
-                "🎯 دارت",
-                callback_data="game_darts"
-            )
-        ]
-    ])
-
-
-def game_created_keyboard(game_id):
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "👥 بازی با دوستان",
-                callback_data=f"join_{game_id}"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🤖 بازی با ربات",
-                callback_data=f"bot_{game_id}"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "❌ لغو",
-                callback_data=f"cancel_{game_id}"
-            )
-        ]
-    ])
 
 
 # ============================================================
@@ -803,8 +1057,9 @@ async def start(update, context):
     if not user:
         return
 
-    referrer_id = None
+    ensure_user(user)
 
+    # /start REFERRER
     if context.args:
         try:
             referrer_id = int(
@@ -812,13 +1067,18 @@ async def start(update, context):
                     context.args[0]
                 )
             )
+            await process_referral(
+                user,
+                referrer_id
+            )
         except Exception:
-            referrer_id = None
+            pass
 
-    ensure_user(
-        user,
-        referrer_id
-    )
+    if not await require_join(
+        update,
+        context
+    ):
+        return
 
     if is_blocked(user.id):
 
@@ -828,18 +1088,12 @@ async def start(update, context):
 
         return
 
-    if not await check_access(
-        update,
-        context
-    ):
-        return
-
     await update.effective_message.reply_text(
         "👋 سلام!\n\n"
         "🎮 به ربات بازی خوش آمدی.\n\n"
-        "💰 واحد موجودی: TRX\n\n"
-        "از منوی زیر استفاده کن.",
-        reply_markup=user_keyboard()
+        "💰 موجودی شما اعتبار داخلی بازی است.\n"
+        "برای شروع از منوی زیر استفاده کن.",
+        reply_markup=main_keyboard()
     )
 
 
@@ -856,38 +1110,49 @@ async def show_balance(update, context):
 
     ensure_user(user)
 
-    if not await check_access(update, context):
+    if not await require_join(
+        update,
+        context
+    ):
         return
 
     if is_blocked(user.id):
         return
 
-    balance = get_balance(user.id)
+    balance = get_balance(
+        user.id
+    )
 
     await update.effective_message.reply_text(
         f"💰 موجودی {name_of(user)}:\n\n"
-        f"💎 {money(balance)} TRX"
+        f"💎 {money(balance)}"
     )
 
 
 # ============================================================
-# GAME MENUS
+# GAME MENU
 # ============================================================
 
 async def game_menu(update, context):
 
-    if not await check_access(update, context):
+    if not await require_join(
+        update,
+        context
+    ):
         return
 
     await update.effective_message.reply_text(
-        "🎮 بازی را انتخاب کن:",
+        "🎮 نوع بازی را انتخاب کن:",
         reply_markup=game_keyboard()
     )
 
 
 async def friends_menu(update, context):
 
-    if not await check_access(update, context):
+    if not await require_join(
+        update,
+        context
+    ):
         return
 
     if update.effective_chat.type not in (
@@ -896,7 +1161,7 @@ async def friends_menu(update, context):
     ):
 
         await update.effective_message.reply_text(
-            "❌ بازی با دوستان فقط داخل گپ است."
+            "❌ بازی با دوستان فقط داخل گپ قابل ساخت است."
         )
 
         return
@@ -906,27 +1171,30 @@ async def friends_menu(update, context):
         "مثال:\n"
         "1 تاس 0.5\n"
         "2 تاس 0.5\n"
-        "10 بولینگ 0.5\n"
+        "1 بولینگ 0.5\n"
         "2 بسکتبال 0.5\n"
         "3 دارت 0.5\n\n"
-        "تعداد بازی و پرتاب محدودیت ندارد."
+        "تعداد بازی/پرتاب محدودیت ندارد."
     )
 
 
 async def bot_menu(update, context):
 
-    if not await check_access(update, context):
+    if not await require_join(
+        update,
+        context
+    ):
         return
 
     await update.effective_message.reply_text(
         "🤖 بازی با ربات\n\n"
-        "مثال:\n"
+        "در پیوی یا گپ بنویس:\n\n"
         "1 تاس 0.5\n"
         "2 تاس 0.5\n"
         "1 بولینگ 0.5\n"
         "1 بسکتبال 0.5\n"
         "1 دارت 0.5\n\n"
-        "بعد از ساخت بازی، خودت ایموجی بازی را بفرست."
+        "بعد از ساخت بازی، خودت بازی را می‌اندازی."
     )
 
 
@@ -934,305 +1202,29 @@ async def bot_menu(update, context):
 # CREATE GAME
 # ============================================================
 
-async def create_game_message(
+async def create_game(
     update,
     context,
-    game,
+    game_type,
     rounds,
     amount
 ):
 
     user = update.effective_user
     chat = update.effective_chat
+    message = update.effective_message
+
+    if not user or not chat or not message:
+        return
 
     ensure_user(user)
-
-    if not await check_access(
-        update,
-        context
-    ):
-        return
 
     if is_blocked(user.id):
         return
 
-    # قفل قبل از بررسی و برداشت
-    async with DB_LOCK:
-
-        if not debit_balance(
-            user.id,
-            amount
-        ):
-
-            await update.effective_message.reply_text(
-                f"❌ موجودی کافی نیست.\n"
-                f"💰 موجودی: "
-                f"{money(get_balance(user.id))} TRX"
-            )
-
-            return
-
-        try:
-
-            with closing(db()) as con:
-
-                cur = con.execute("""
-                INSERT INTO games
-                (chat_id, creator_id, game_type,
-                 amount, rounds, status)
-                VALUES (?, ?, ?, ?, ?, 'waiting')
-                """, (
-                    chat.id,
-                    user.id,
-                    game,
-                    str(amount),
-                    rounds
-                ))
-
-                game_id = cur.lastrowid
-
-                con.commit()
-
-            sent = await context.bot.send_message(
-                chat_id=chat.id,
-                text=(
-                    f"{GAME_LABELS[game]}\n\n"
-                    f"🎮 تعداد: {rounds}\n"
-                    f"💰 مبلغ: {money(amount)} TRX\n\n"
-                    f"👤 سازنده: {name_of(user)}\n\n"
-                    f"یکی از گزینه‌ها را انتخاب کن:"
-                ),
-                reply_markup=game_created_keyboard(
-                    game_id
-                )
-            )
-
-            with closing(db()) as con:
-
-                con.execute("""
-                UPDATE games
-                SET message_id=?
-                WHERE id=?
-                """, (
-                    sent.message_id,
-                    game_id
-                ))
-
-                con.commit()
-
-        except Exception:
-
-            credit_balance(
-                user.id,
-                amount
-            )
-
-            try:
-                with closing(db()) as con:
-                    con.execute(
-                        "DELETE FROM games WHERE id=?",
-                        (game_id,)
-                    )
-                    con.commit()
-            except Exception:
-                pass
-
-            logger.exception(
-                "CREATE GAME ERROR"
-            )
-
-            await update.effective_message.reply_text(
-                "❌ بازی ساخته نشد.\n"
-                "مبلغ به موجودی برگشت داده شد."
-            )
-
-
-# ============================================================
-# GAME TYPE CALLBACK
-# ============================================================
-
-async def game_callback(update, context):
-
-    query = update.callback_query
-
-    await query.answer()
-
-    if query.data == "check_join":
-        if await check_joined(
-            context.bot,
-            query.from_user.id
-        ):
-            await query.message.reply_text(
-                "✅ عضویت تأیید شد.",
-                reply_markup=user_keyboard()
-            )
-        else:
-            await query.answer(
-                "❌ هنوز عضو کانال نیستی.",
-                show_alert=True
-            )
-        return
-
-    user = query.from_user
-
-    ensure_user(user)
-
-    if not await check_access(
-        update,
-        context
-    ):
-        return
-
-    game = query.data.replace(
-        "game_",
-        "",
-        1
-    )
-
-    if game not in GAME_LABELS:
-        return
-
-    title = GAME_LABELS[game]
-
-    await query.message.reply_text(
-        f"{title}\n\n"
-        f"مثال:\n"
-        f"1 {title.split(' ', 1)[1]} 0.5\n\n"
-        f"تعداد پرتاب محدودیت ندارد."
-    )
-
-
-# ============================================================
-# GAME DB
-# ============================================================
-
-def get_game(game_id):
-    with closing(db()) as con:
-        return con.execute(
-            "SELECT * FROM games WHERE id=?",
-            (game_id,)
-        ).fetchone()
-
-
-def parse_rolls(value):
-    if not value:
-        return []
-
-    result = []
-
-    for x in value.split(","):
-
-        try:
-            result.append(int(x))
-        except Exception:
-            pass
-
-    return result
-
-
-def save_game(
-    game_id,
-    creator_rolls=None,
-    opponent_rolls=None,
-    status=None,
-    winner_id="NOCHANGE"
-):
-
-    with closing(db()) as con:
-
-        fields = []
-        values = []
-
-        if creator_rolls is not None:
-            fields.append("creator_rolls=?")
-            values.append(
-                ",".join(
-                    map(str, creator_rolls)
-                )
-            )
-
-        if opponent_rolls is not None:
-            fields.append("opponent_rolls=?")
-            values.append(
-                ",".join(
-                    map(str, opponent_rolls)
-                )
-            )
-
-        if status is not None:
-            fields.append("status=?")
-            values.append(status)
-
-        if winner_id != "NOCHANGE":
-            fields.append("winner_id=?")
-            values.append(winner_id)
-
-        if not fields:
-            return
-
-        values.append(game_id)
-
-        con.execute(
-            f"""
-            UPDATE games
-            SET {", ".join(fields)}
-            WHERE id=?
-            """,
-            tuple(values)
-        )
-
-        con.commit()
-
-
-# ============================================================
-# GAME LOCK
-# ============================================================
-
-async def get_game_lock(game_id):
-
-    async with GAME_LOCKS_GUARD:
-
-        lock = GAME_LOCKS.get(game_id)
-
-        if lock is None:
-            lock = asyncio.Lock()
-            GAME_LOCKS[game_id] = lock
-
-        return lock
-
-
-async def remove_game_lock(game_id):
-
-    async with GAME_LOCKS_GUARD:
-        GAME_LOCKS.pop(game_id, None)
-
-
-# ============================================================
-# JOIN FRIEND
-# ============================================================
-
-async def join_friend(update, context):
-
-    query = update.callback_query
-
-    await query.answer()
-
-    user = query.from_user
-
-    if not await check_access(
-        update,
-        context
-    ):
-        return
-
-    try:
-        game_id = int(
-            query.data.split("_")[1]
-        )
-    except Exception:
-        return
-
-    ensure_user(user)
+    # --------------------------------------------------------
+    # اتمیک رزرو موجودی + ساخت بازی
+    # --------------------------------------------------------
 
     async with DB_LOCK:
 
@@ -1241,69 +1233,39 @@ async def join_friend(update, context):
             try:
                 con.execute("BEGIN IMMEDIATE")
 
-                game = con.execute(
-                    "SELECT * FROM games WHERE id=?",
-                    (game_id,)
-                ).fetchone()
+                row = con.execute("""
+                SELECT balance
+                FROM users
+                WHERE user_id=?
+                """, (
+                    user.id,
+                )).fetchone()
 
-                if not game:
-
+                if not row:
                     con.execute("ROLLBACK")
 
-                    await query.answer(
-                        "❌ بازی پیدا نشد.",
-                        show_alert=True
+                    await message.reply_text(
+                        "❌ کاربر پیدا نشد."
                     )
 
                     return
 
-                if game["status"] != "waiting":
-
-                    con.execute("ROLLBACK")
-
-                    await query.answer(
-                        "❌ بازی دیگر قابل ورود نیست.",
-                        show_alert=True
-                    )
-
-                    return
-
-                creator_id = int(
-                    game["creator_id"]
+                balance = D(
+                    row["balance"]
                 )
 
-                if creator_id == user.id:
-
+                if balance < amount:
                     con.execute("ROLLBACK")
 
-                    await query.answer(
-                        "❌ خودت سازنده بازی هستی.",
-                        show_alert=True
+                    await message.reply_text(
+                        "❌ موجودی کافی نیست.\n\n"
+                        f"💰 موجودی: {money(balance)}"
                     )
 
                     return
 
-                amount = D(game["amount"])
-
-                row = con.execute(
-                    "SELECT balance FROM users WHERE user_id=?",
-                    (user.id,)
-                ).fetchone()
-
-                if not row or D(row["balance"]) < amount:
-
-                    con.execute("ROLLBACK")
-
-                    await query.answer(
-                        "❌ موجودی کافی نیست.",
-                        show_alert=True
-                    )
-
-                    return
-
-                new_balance = (
-                    D(row["balance"]) - amount
-                )
+                # رزرو پول
+                new_balance = balance - amount
 
                 con.execute("""
                 UPDATE users
@@ -1314,15 +1276,28 @@ async def join_friend(update, context):
                     user.id
                 ))
 
-                con.execute("""
-                UPDATE games
-                SET opponent_id=?,
-                    status='creator_turn'
-                WHERE id=?
+                # بازی را بلافاصله ثبت می‌کنیم
+                cur = con.execute("""
+                INSERT INTO games
+                (
+                    chat_id,
+                    creator_id,
+                    game_type,
+                    amount,
+                    rounds,
+                    status,
+                    settled
+                )
+                VALUES (?, ?, ?, ?, ?, 'waiting', 0)
                 """, (
+                    chat.id,
                     user.id,
-                    game_id
+                    game_type,
+                    str(amount),
+                    rounds,
                 ))
+
+                game_id = cur.lastrowid
 
                 con.execute("COMMIT")
 
@@ -1334,58 +1309,190 @@ async def join_friend(update, context):
                     pass
 
                 logger.exception(
-                    "JOIN FRIEND ERROR"
+                    "CREATE GAME FAILED"
                 )
 
-                await query.answer(
-                    "❌ خطا؛ دوباره تلاش کن.",
-                    show_alert=True
+                await message.reply_text(
+                    "❌ ساخت بازی انجام نشد. "
+                    "موجودی شما کسر نشده است."
                 )
 
                 return
 
+    # --------------------------------------------------------
+    # ارسال پیام بازی
+    # --------------------------------------------------------
+
     try:
-        await query.message.edit_reply_markup(
-            reply_markup=None
+
+        sent = await context.bot.send_message(
+            chat_id=chat.id,
+            text=(
+                f"{GAME_LABELS[game_type]}\n\n"
+                f"🎮 تعداد پرتاب: {rounds}\n"
+                f"💰 مبلغ: {money(amount)}\n\n"
+                f"👤 سازنده: {name_of(user)}\n\n"
+                f"یکی از گزینه‌ها را انتخاب کن:"
+            ),
+            reply_markup=created_game_keyboard(
+                game_id
+            )
         )
+
+        with closing(db()) as con:
+
+            con.execute("""
+            UPDATE games
+            SET message_id=?,
+                updated_at=CURRENT_TIMESTAMP
+            WHERE id=?
+            """, (
+                sent.message_id,
+                game_id
+            ))
+
+            con.commit()
+
     except Exception:
-        pass
 
-    await query.message.reply_text(
-        f"👥 حریف وارد بازی شد: {name_of(user)}\n\n"
-        f"🎯 ابتدا سازنده، خودش "
-        f"{game['rounds']} بار "
-        f"{GAME_EMOJIS[game['game_type']]} "
-        f"بیندازد."
-    )
+        logger.exception(
+            "GAME MESSAGE FAILED"
+        )
+
+        # اگر پیام بازی ارسال نشد، رزرو پول برگردد
+        async with DB_LOCK:
+
+            with closing(db()) as con:
+
+                try:
+                    con.execute("BEGIN IMMEDIATE")
+
+                    game = con.execute("""
+                    SELECT settled, status, amount, creator_id
+                    FROM games
+                    WHERE id=?
+                    """, (
+                        game_id,
+                    )).fetchone()
+
+                    if game and int(game["settled"]) == 0:
+
+                        row = con.execute("""
+                        SELECT balance
+                        FROM users
+                        WHERE user_id=?
+                        """, (
+                            user.id,
+                        )).fetchone()
+
+                        if row:
+
+                            balance = D(
+                                row["balance"]
+                            )
+
+                            con.execute("""
+                            UPDATE users
+                            SET balance=?
+                            WHERE user_id=?
+                            """, (
+                                str(
+                                    balance +
+                                    D(game["amount"])
+                                ),
+                                user.id
+                            ))
+
+                        con.execute("""
+                        UPDATE games
+                        SET status='cancelled',
+                            settled=1,
+                            updated_at=CURRENT_TIMESTAMP
+                        WHERE id=?
+                        """, (
+                            game_id,
+                        ))
+
+                    con.execute("COMMIT")
+
+                except Exception:
+
+                    try:
+                        con.execute("ROLLBACK")
+                    except Exception:
+                        pass
+
+                logger.exception(
+                    "GAME REFUND FAILED"
+                )
+
+        await message.reply_text(
+            "❌ بازی ارسال نشد؛ "
+            "مبلغ رزروشده برگشت داده شد."
+        )
 
 
 # ============================================================
-# JOIN BOT
+# GAME HELP CALLBACK
 # ============================================================
 
-async def join_bot(update, context):
+async def game_help_callback(update, context):
 
     query = update.callback_query
 
     await query.answer()
 
+    game = query.data.replace(
+        "help_game_",
+        "",
+        1
+    )
+
+    if game not in GAME_LABELS:
+        return
+
+    label = GAME_LABELS[game]
+
+    await query.message.reply_text(
+        f"{label}\n\n"
+        f"فرمت ساخت بازی:\n"
+        f"`تعداد {label.split(' ', 1)[1]} مبلغ`\n\n"
+        f"مثال:\n"
+        f"1 {label.split(' ', 1)[1]} 0.5\n"
+        f"2 {label.split(' ', 1)[1]} 0.5\n\n"
+        f"تعداد پرتاب محدودیت ندارد."
+    )
+
+
+# ============================================================
+# JOIN FRIEND
+# ============================================================
+
+async def join_friend(update, context):
+
+    query = update.callback_query
     user = query.from_user
 
-    if not await check_access(
-        update,
-        context
-    ):
-        return
+    await query.answer()
 
     try:
         game_id = int(
-            query.data.split("_")[1]
+            query.data.split("_", 1)[1]
         )
     except Exception:
         return
 
     ensure_user(user)
+
+    if not await check_membership(
+        context.bot,
+        user.id
+    ):
+        await query.answer(
+            "ابتدا در کانال عضو شو.",
+            show_alert=True
+        )
+        return
 
     lock = await get_game_lock(
         game_id
@@ -1402,50 +1509,246 @@ async def join_bot(update, context):
                         "BEGIN IMMEDIATE"
                     )
 
-                    game = con.execute(
-                        "SELECT * FROM games WHERE id=?",
-                        (game_id,)
-                    ).fetchone()
+                    game = con.execute("""
+                    SELECT *
+                    FROM games
+                    WHERE id=?
+                    """, (
+                        game_id,
+                    )).fetchone()
 
                     if not game:
-
                         con.execute("ROLLBACK")
 
                         await query.answer(
                             "❌ بازی پیدا نشد.",
                             show_alert=True
                         )
-
                         return
 
                     if game["status"] != "waiting":
-
                         con.execute("ROLLBACK")
 
                         await query.answer(
-                            "❌ این بازی قبلاً شروع شده.",
+                            "❌ این بازی دیگر قابل ورود نیست.",
                             show_alert=True
                         )
+                        return
 
+                    creator_id = int(
+                        game["creator_id"]
+                    )
+
+                    if creator_id == user.id:
+                        con.execute("ROLLBACK")
+
+                        await query.answer(
+                            "❌ خودت سازنده بازی هستی.",
+                            show_alert=True
+                        )
+                        return
+
+                    amount = D(
+                        game["amount"]
+                    )
+
+                    row = con.execute("""
+                    SELECT balance
+                    FROM users
+                    WHERE user_id=?
+                    """, (
+                        user.id,
+                    )).fetchone()
+
+                    if not row:
+                        con.execute("ROLLBACK")
+
+                        await query.answer(
+                            "❌ ابتدا /start را بزن.",
+                            show_alert=True
+                        )
+                        return
+
+                    balance = D(
+                        row["balance"]
+                    )
+
+                    if balance < amount:
+                        con.execute("ROLLBACK")
+
+                        await query.answer(
+                            "❌ موجودی کافی نیست.",
+                            show_alert=True
+                        )
+                        return
+
+                    # قفل مبلغ حریف
+                    con.execute("""
+                    UPDATE users
+                    SET balance=?
+                    WHERE user_id=?
+                    """, (
+                        str(balance - amount),
+                        user.id
+                    ))
+
+                    con.execute("""
+                    UPDATE games
+                    SET opponent_id=?,
+                        status='creator_turn',
+                        updated_at=CURRENT_TIMESTAMP
+                    WHERE id=?
+                    AND status='waiting'
+                    """, (
+                        user.id,
+                        game_id
+                    ))
+
+                    con.execute("COMMIT")
+
+                except Exception:
+
+                    try:
+                        con.execute("ROLLBACK")
+                    except Exception:
+                        pass
+
+                    logger.exception(
+                        "JOIN FRIEND FAILED"
+                    )
+
+                    await query.answer(
+                        "❌ ورود به بازی انجام نشد.",
+                        show_alert=True
+                    )
+
+                    return
+
+        try:
+            await query.message.edit_reply_markup(
+                reply_markup=None
+            )
+        except Exception:
+            pass
+
+        creator_id = int(
+            game["creator_id"]
+        )
+
+        creator_name = str(
+            creator_id
+        )
+
+        try:
+            creator_chat = await context.bot.get_chat(
+                creator_id
+            )
+            creator_name = (
+                creator_chat.first_name
+                or creator_chat.username
+                or str(creator_id)
+            )
+        except Exception:
+            pass
+
+        await query.message.reply_text(
+            f"👥 حریف وارد بازی شد: {name_of(user)}\n\n"
+            f"🎯 ابتدا {creator_name} باید "
+            f"{game['rounds']} بار "
+            f"{GAME_EMOJIS[game['game_type']]} "
+            f"را خودش بفرستد.\n\n"
+            f"🤖 ربات به جای بازیکن تاس نمی‌اندازد."
+        )
+
+
+# ============================================================
+# PLAY VS BOT
+# ============================================================
+
+async def play_vs_bot(update, context):
+
+    query = update.callback_query
+    user = query.from_user
+
+    await query.answer()
+
+    try:
+        game_id = int(
+            query.data.split("_", 1)[1]
+        )
+    except Exception:
+        return
+
+    ensure_user(user)
+
+    if not await check_membership(
+        context.bot,
+        user.id
+    ):
+        await query.answer(
+            "ابتدا در کانال عضو شو.",
+            show_alert=True
+        )
+        return
+
+    lock = await get_game_lock(
+        game_id
+    )
+
+    async with lock:
+
+        async with DB_LOCK:
+
+            with closing(db()) as con:
+
+                try:
+                    con.execute(
+                        "BEGIN IMMEDIATE"
+                    )
+
+                    game = con.execute("""
+                    SELECT *
+                    FROM games
+                    WHERE id=?
+                    """, (
+                        game_id,
+                    )).fetchone()
+
+                    if not game:
+                        con.execute("ROLLBACK")
+
+                        await query.answer(
+                            "❌ بازی پیدا نشد.",
+                            show_alert=True
+                        )
+                        return
+
+                    if game["status"] != "waiting":
+                        con.execute("ROLLBACK")
+
+                        await query.answer(
+                            "❌ این بازی دیگر قابل شروع نیست.",
+                            show_alert=True
+                        )
                         return
 
                     if int(game["creator_id"]) != user.id:
-
                         con.execute("ROLLBACK")
 
                         await query.answer(
                             "❌ فقط سازنده بازی می‌تواند با ربات بازی کند.",
                             show_alert=True
                         )
-
                         return
 
-                    # مبلغ قبلاً هنگام ساخت بازی رزرو شده.
+                    # پول سازنده از قبل هنگام ساخت بازی رزرو شده.
                     con.execute("""
                     UPDATE games
-                    SET opponent_id=NULL,
-                        status='bot_creator_turn'
+                    SET status='bot_creator_turn',
+                        opponent_id=NULL,
+                        updated_at=CURRENT_TIMESTAMP
                     WHERE id=?
+                    AND status='waiting'
                     """, (
                         game_id,
                     ))
@@ -1460,11 +1763,11 @@ async def join_bot(update, context):
                         pass
 
                     logger.exception(
-                        "BOT JOIN ERROR"
+                        "BOT GAME START FAILED"
                     )
 
                     await query.answer(
-                        "❌ خطا؛ دوباره تلاش کن.",
+                        "❌ شروع بازی انجام نشد.",
                         show_alert=True
                     )
 
@@ -1482,25 +1785,26 @@ async def join_bot(update, context):
             f"👤 {name_of(user)}\n\n"
             f"اول خودت {game['rounds']} بار "
             f"{GAME_EMOJIS[game['game_type']]} "
-            f"بینداز."
+            f"بفرست.\n\n"
+            f"بعد از پایان پرتاب‌های تو، "
+            f"ربات خودش پرتاب می‌کند."
         )
 
 
 # ============================================================
-# CANCEL
+# CANCEL GAME
 # ============================================================
 
 async def cancel_game(update, context):
 
     query = update.callback_query
+    user = query.from_user
 
     await query.answer()
 
-    user = query.from_user
-
     try:
         game_id = int(
-            query.data.split("_")[1]
+            query.data.split("_", 1)[1]
         )
     except Exception:
         return
@@ -1520,71 +1824,84 @@ async def cancel_game(update, context):
                         "BEGIN IMMEDIATE"
                     )
 
-                    game = con.execute(
-                        "SELECT * FROM games WHERE id=?",
-                        (game_id,)
-                    ).fetchone()
+                    game = con.execute("""
+                    SELECT *
+                    FROM games
+                    WHERE id=?
+                    """, (
+                        game_id,
+                    )).fetchone()
 
                     if not game:
-
                         con.execute("ROLLBACK")
 
                         await query.answer(
                             "❌ بازی پیدا نشد.",
                             show_alert=True
                         )
-
-                        return
-
-                    if game["status"] != "waiting":
-
-                        con.execute("ROLLBACK")
-
-                        await query.answer(
-                            "❌ بازی شروع شده و قابل لغو نیست.",
-                            show_alert=True
-                        )
-
                         return
 
                     if int(game["creator_id"]) != user.id:
-
                         con.execute("ROLLBACK")
 
                         await query.answer(
                             "❌ فقط سازنده می‌تواند لغو کند.",
                             show_alert=True
                         )
+                        return
 
+                    if game["status"] != "waiting":
+                        con.execute("ROLLBACK")
+
+                        await query.answer(
+                            "❌ بازی شروع شده و قابل لغو نیست.",
+                            show_alert=True
+                        )
+                        return
+
+                    if int(game["settled"]) == 1:
+                        con.execute("ROLLBACK")
+
+                        await query.answer(
+                            "این بازی قبلاً تسویه شده.",
+                            show_alert=True
+                        )
                         return
 
                     amount = D(
                         game["amount"]
                     )
 
-                    row = con.execute(
-                        "SELECT balance FROM users WHERE user_id=?",
-                        (user.id,)
-                    ).fetchone()
+                    row = con.execute("""
+                    SELECT balance
+                    FROM users
+                    WHERE user_id=?
+                    """, (
+                        user.id,
+                    )).fetchone()
 
-                    if row:
+                    if not row:
+                        con.execute("ROLLBACK")
+                        return
 
-                        new_balance = (
-                            D(row["balance"]) + amount
-                        )
+                    balance = D(
+                        row["balance"]
+                    )
 
-                        con.execute("""
-                        UPDATE users
-                        SET balance=?
-                        WHERE user_id=?
-                        """, (
-                            str(new_balance),
-                            user.id
-                        ))
+                    con.execute("""
+                    UPDATE users
+                    SET balance=?
+                    WHERE user_id=?
+                    """, (
+                        str(balance + amount),
+                        user.id
+                    ))
 
                     con.execute("""
                     UPDATE games
-                    SET status='cancelled'
+                    SET status='cancelled',
+                        settled=1,
+                        updated_at=CURRENT_TIMESTAMP
                     WHERE id=?
                     """, (
                         game_id,
@@ -1600,125 +1917,82 @@ async def cancel_game(update, context):
                         pass
 
                     logger.exception(
-                        "CANCEL ERROR"
+                        "CANCEL FAILED"
+                    )
+
+                    await query.answer(
+                        "❌ لغو بازی انجام نشد.",
+                        show_alert=True
                     )
 
                     return
 
-        await remove_game_lock(
-            game_id
+        try:
+            await query.message.edit_reply_markup(
+                reply_markup=None
+            )
+        except Exception:
+            pass
+
+        await query.message.reply_text(
+            "❌ بازی لغو شد.\n"
+            f"💰 {money(game['amount'])} "
+            f"اعتبار برگشت داده شد."
         )
 
-    try:
-        await query.message.edit_reply_markup(
-            reply_markup=None
-        )
-    except Exception:
-        pass
-
-    await query.message.reply_text(
-        f"❌ بازی لغو شد.\n"
-        f"💰 {money(game['amount'])} TRX برگشت داده شد."
-    )
+    await remove_game_lock(game_id)
 
 
 # ============================================================
 # SAFE SEND DICE
 # ============================================================
 
-async def safe_send_dice(
-    context,
+async def send_game_dice(
+    bot,
     chat_id,
-    emoji,
-    retries=4
+    emoji
 ):
+    """
+    ربات خودش پرتاب را انجام می‌دهد.
+    در صورت خطای TelegramException، exception را بالا نمی‌فرستیم
+    تا polling اصلی بات متوقف نشود.
+    """
 
-    last_error = None
+    try:
+        message = await bot.send_dice(
+            chat_id=chat_id,
+            emoji=emoji
+        )
 
-    for attempt in range(
-        1,
-        retries + 1
-    ):
+        if not message or not message.dice:
+            return None
 
-        try:
+        return int(
+            message.dice.value
+        )
 
-            sent = await context.bot.send_dice(
-                chat_id=chat_id,
-                emoji=emoji
-            )
+    except TelegramError:
+        logger.exception(
+            "BOT SEND DICE FAILED"
+        )
+        return None
 
-            if not sent or not sent.dice:
-                raise RuntimeError(
-                    "Telegram returned no dice"
-                )
-
-            return sent.dice.value
-
-        except (
-            NetworkError,
-            TimedOut
-        ) as e:
-
-            last_error = e
-
-            logger.warning(
-                "DICE NETWORK ERROR attempt=%s/%s: %s",
-                attempt,
-                retries,
-                e
-            )
-
-            await asyncio.sleep(
-                min(2 * attempt, 8)
-            )
-
-        except (
-            Forbidden,
-            BadRequest,
-            TelegramError
-        ) as e:
-
-            last_error = e
-
-            logger.error(
-                "DICE TELEGRAM ERROR: %s",
-                e
-            )
-
-            # خطای تلگرام را دوباره امتحان می‌کنیم
-            # ولی بی‌نهایت نه.
-            await asyncio.sleep(
-                min(attempt, 3)
-            )
-
-        except Exception as e:
-
-            last_error = e
-
-            logger.exception(
-                "UNKNOWN DICE ERROR"
-            )
-
-            await asyncio.sleep(
-                min(attempt, 3)
-            )
-
-    raise RuntimeError(
-        f"send_dice failed: {last_error}"
-    )
+    except Exception:
+        logger.exception(
+            "UNKNOWN BOT DICE ERROR"
+        )
+        return None
 
 
 # ============================================================
-# FINISH / REFUND HELPERS
+# FINISH / SETTLEMENT
 # ============================================================
 
-async def refund_bot_game(
+async def settle_friend_game(
     context,
     game_id,
-    user_id,
-    amount,
-    chat_id,
-    reason
+    creator_rolls,
+    opponent_rolls
 ):
 
     lock = await get_game_lock(
@@ -1736,128 +2010,272 @@ async def refund_bot_game(
                         "BEGIN IMMEDIATE"
                     )
 
-                    game = con.execute(
-                        "SELECT status FROM games WHERE id=?",
-                        (game_id,)
-                    ).fetchone()
-
-                    if not game:
-                        con.execute(
-                            "ROLLBACK"
-                        )
-                        return
-
-                    # فقط یک بار برگشت داده شود.
-                    if game["status"] == "finished":
-                        con.execute(
-                            "ROLLBACK"
-                        )
-                        return
-
-                    row = con.execute(
-                        "SELECT balance FROM users WHERE user_id=?",
-                        (user_id,)
-                    ).fetchone()
-
-                    if not row:
-                        con.execute(
-                            "ROLLBACK"
-                        )
-                        return
-
-                    new_balance = (
-                        D(row["balance"]) + D(amount)
-                    )
-
-                    con.execute("""
-                    UPDATE users
-                    SET balance=?
-                    WHERE user_id=?
-                    """, (
-                        str(new_balance),
-                        user_id
-                    ))
-
-                    con.execute("""
-                    UPDATE games
-                    SET status='refunded'
+                    game = con.execute("""
+                    SELECT *
+                    FROM games
                     WHERE id=?
                     """, (
-                        game_id
-                    ))
+                        game_id,
+                    )).fetchone()
 
-                    con.execute(
-                        "COMMIT"
+                    if not game:
+                        con.execute("ROLLBACK")
+                        return
+
+                    # ضد دوباره پرداخت
+                    if int(game["settled"]) == 1:
+                        con.execute("ROLLBACK")
+                        return
+
+                    if game["status"] != "finished":
+                        con.execute("ROLLBACK")
+                        return
+
+                    creator_id = int(
+                        game["creator_id"]
                     )
 
-                except Exception:
+                    opponent_id = int(
+                        game["opponent_id"]
+                    )
 
-                    try:
-                        con.execute(
-                            "ROLLBACK"
+                    amount = D(
+                        game["amount"]
+                    )
+
+                    score_creator = calculate_score(
+                        creator_rolls
+                    )
+
+                    score_opponent = calculate_score(
+                        opponent_rolls
+                    )
+
+                    result = winner_from_scores(
+                        score_creator,
+                        score_opponent
+                    )
+
+                    # ------------------------------------------------
+                    # مساوی
+                    # ------------------------------------------------
+
+                    if result == 0:
+
+                        creator = con.execute("""
+                        SELECT balance
+                        FROM users
+                        WHERE user_id=?
+                        """, (
+                            creator_id,
+                        )).fetchone()
+
+                        opponent = con.execute("""
+                        SELECT balance
+                        FROM users
+                        WHERE user_id=?
+                        """, (
+                            opponent_id,
+                        )).fetchone()
+
+                        if not creator or not opponent:
+                            con.execute("ROLLBACK")
+                            return
+
+                        creator_balance = D(
+                            creator["balance"]
                         )
-                    except Exception:
-                        pass
 
-                    logger.exception(
-                        "REFUND ERROR"
-                    )
+                        opponent_balance = D(
+                            opponent["balance"]
+                        )
 
-                    return
+                        con.execute("""
+                        UPDATE users
+                        SET balance=?
+                        WHERE user_id=?
+                        """, (
+                            str(
+                                creator_balance +
+                                amount
+                            ),
+                            creator_id
+                        ))
 
-    try:
+                        con.execute("""
+                        UPDATE users
+                        SET balance=?
+                        WHERE user_id=?
+                        """, (
+                            str(
+                                opponent_balance +
+                                amount
+                            ),
+                            opponent_id
+                        ))
 
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=(
-                f"⚠️ بازی با ربات متوقف شد.\n\n"
-                f"👤 {user_id}\n"
-                f"💰 مبلغ {money(amount)} TRX "
-                f"برگشت داده شد.\n\n"
-                f"دلیل: {reason}"
+                        con.execute("""
+                        UPDATE games
+                        SET settled=1,
+                            updated_at=CURRENT_TIMESTAMP
+                        WHERE id=?
+                        """, (
+                            game_id,
+                        ))
+
+                        con.execute("COMMIT")
+
+                        result_text = (
+                            f"🤝 مساوی شد!\n\n"
+                            f"👤 {creator_id}: {score_creator}\n"
+                            f"👤 {opponent_id}: {score_opponent}\n\n"
+                            f"💰 مبلغ هر دو نفر برگشت داده شد."
+                        )
+
+                    else:
+
+                        if result == 1:
+                            winner_id = creator_id
+                            loser_id = opponent_id
+                            winner_score = score_creator
+                            loser_score = score_opponent
+                        else:
+                            winner_id = opponent_id
+                            loser_id = creator_id
+                            winner_score = score_opponent
+                            loser_score = score_creator
+
+                        # کل مبلغ دو طرف
+                        total = amount * 2
+
+                        # نمونه برای 0.5:
+                        # برنده 0.95
+                        # مالک 0.02
+                        # کارمزد 0.03
+                        #
+                        # برای مبلغ‌های بزرگ‌تر، همین نسبت حفظ می‌شود.
+                        owner_share = (
+                            amount *
+                            OWNER_SHARE
+                        )
+
+                        fee = (
+                            amount *
+                            BOT_FEE
+                        )
+
+                        # برای مدل درصدی:
+                        payout = (
+                            total *
+                            WINNER_PAYOUT_RATE
+                        )
+
+                        # اطمینان از اینکه مجموع از کل بیشتر نشود
+                        max_payout = (
+                            total -
+                            owner_share -
+                            fee
+                        )
+
+                        if payout > max_payout:
+                            payout = max_payout
+
+                        winner = con.execute("""
+                        SELECT balance
+                        FROM users
+                        WHERE user_id=?
+                        """, (
+                            winner_id,
+                        )).fetchone()
+
+                        if not winner:
+                            con.execute("ROLLBACK")
+                            return
+
+                        winner_balance = D(
+                            winner["balance"]
+                        )
+
+                        con.execute("""
+                        UPDATE users
+                        SET balance=?
+                        WHERE user_id=?
+                        """, (
+                            str(
+                                winner_balance +
+                                payout
+                            ),
+                            winner_id
+                        ))
+
+                        house = con.execute("""
+                        SELECT owner_balance,
+                               fee_balance
+                        FROM house
+                        WHERE id=1
+                        """).fetchone()
+
+                        house_owner = D(
+                            house["owner_balance"]
+                        )
+
+                        house_fee = D(
+                            house["fee_balance"]
+                        )
+
+                        con.execute("""
+                        UPDATE house
+                        SET owner_balance=?,
+                            fee_balance=?
+                        WHERE id=1
+                        """, (
+                            str(
+                                house_owner +
+                                owner_share
+                            ),
+                            str(
+                                house_fee +
+                                fee
+                            )
+                        ))
+
+                        con.execute("""
+                        UPDATE games
+                        SET winner_id=?,
+                            settled=1,
+                            updated_at=CURRENT_TIMESTAMP
+                        WHERE id=?
+                        """, (
+                            winner_id,
+                            game_id
+                        ))
+
+                        con.execute("COMMIT")
+
+                        result_text = (
+                            f"🏆 نتیجه بازی\n\n"
+                            f"👤 {creator_id}: {score_creator}\n"
+                            f"👤 {opponent_id}: {score_opponent}\n\n"
+                            f"🏆 برنده: {winner_id}\n"
+                            f"🎯 امتیاز برنده: {winner_score}\n"
+                            f"🎯 امتیاز حریف: {loser_score}\n\n"
+                            f"💰 دریافتی برنده: {money(payout)}"
+                        )
+
+        try:
+            await context.bot.send_message(
+                chat_id=game["chat_id"],
+                text=result_text
             )
-        )
+        except Exception:
+            logger.exception(
+                "FRIEND RESULT SEND FAILED"
+            )
 
-    except Exception:
-        logger.exception(
-            "REFUND MESSAGE ERROR"
-        )
-
-    await remove_game_lock(
-        game_id
-    )
+    await remove_game_lock(game_id)
 
 
-# ============================================================
-# CALCULATION
-# ============================================================
-
-def calculate_score(rolls):
-    return sum(
-        int(x)
-        for x in rolls
-    )
-
-
-def winner_from_scores(
-    score1,
-    score2
-):
-
-    if score1 > score2:
-        return 1
-
-    if score2 > score1:
-        return 2
-
-    return 0
-
-
-# ============================================================
-# FINISH BOT GAME
-# ============================================================
-
-async def finish_bot_game(
+async def settle_bot_game(
     context,
     game_id,
     user_rolls,
@@ -1870,288 +2288,295 @@ async def finish_bot_game(
 
     async with lock:
 
-        game = get_game(game_id)
-
-        if not game:
-            return
-
-        if game["status"] == "finished":
-            return
-
-        user_id = int(
-            game["creator_id"]
-        )
-
-        amount = D(
-            game["amount"]
-        )
-
-        user_score = calculate_score(
-            user_rolls
-        )
-
-        bot_score = calculate_score(
-            bot_rolls
-        )
-
-        result = winner_from_scores(
-            user_score,
-            bot_score
-        )
-
-        # مساوی
-        if result == 0:
-
-            async with DB_LOCK:
-
-                credit_balance(
-                    user_id,
-                    amount
-                )
-
-                save_game(
-                    game_id,
-                    creator_rolls=user_rolls,
-                    opponent_rolls=bot_rolls,
-                    status="finished",
-                    winner_id=None
-                )
-
-            await context.bot.send_message(
-                chat_id=game["chat_id"],
-                text=(
-                    f"🤝 مساوی شد!\n\n"
-                    f"👤 {user_id}: {user_score}\n"
-                    f"🤖 ربات: {bot_score}\n\n"
-                    f"💰 {money(amount)} TRX "
-                    f"برگشت داده شد."
-                )
-            )
-
-            await remove_game_lock(
-                game_id
-            )
-
-            return
-
-        # کاربر برد
-        if result == 1:
-
-            payout = (
-                amount * 2
-                - OWNER_SHARE
-                - BOT_FEE
-            )
-
-            async with DB_LOCK:
-
-                credit_balance(
-                    user_id,
-                    payout
-                )
-
-                add_house(
-                    OWNER_SHARE,
-                    BOT_FEE
-                )
-
-                save_game(
-                    game_id,
-                    creator_rolls=user_rolls,
-                    opponent_rolls=bot_rolls,
-                    status="finished",
-                    winner_id=user_id
-                )
-
-            result_text = (
-                f"🏆 برنده: 👤 {user_id}\n"
-                f"💰 دریافتی: {money(payout)} TRX"
-            )
-
-        # ربات برد
-        else:
-
-            async with DB_LOCK:
-
-                add_house(
-                    amount,
-                    Decimal("0")
-                )
-
-                save_game(
-                    game_id,
-                    creator_rolls=user_rolls,
-                    opponent_rolls=bot_rolls,
-                    status="finished",
-                    winner_id=None
-                )
-
-            result_text = (
-                "🏆 برنده: 🤖 ربات\n"
-                "💰 این دور پرداختی به کاربر ندارد."
-            )
-
-        await context.bot.send_message(
-            chat_id=game["chat_id"],
-            text=(
-                f"🏆 نتیجه بازی\n\n"
-                f"👤 {user_id}: {user_score}\n"
-                f"🤖 ربات: {bot_score}\n\n"
-                f"{result_text}"
-            )
-        )
-
-        await remove_game_lock(
-            game_id
-        )
-
-
-# ============================================================
-# FINISH FRIEND
-# ============================================================
-
-async def finish_friend_game(
-    context,
-    game_id,
-    creator_rolls,
-    opponent_rolls
-):
-
-    lock = await get_game_lock(
-        game_id
-    )
-
-    async with lock:
-
-        game = get_game(
-            game_id
-        )
-
-        if not game:
-            return
-
-        if game["status"] == "finished":
-            return
-
-        creator_id = int(
-            game["creator_id"]
-        )
-
-        opponent_id = int(
-            game["opponent_id"]
-        )
-
-        amount = D(
-            game["amount"]
-        )
-
-        score_creator = calculate_score(
-            creator_rolls
-        )
-
-        score_opponent = calculate_score(
-            opponent_rolls
-        )
-
-        result = winner_from_scores(
-            score_creator,
-            score_opponent
-        )
-
-        # مساوی
-        if result == 0:
-
-            async with DB_LOCK:
-
-                credit_balance(
-                    creator_id,
-                    amount
-                )
-
-                credit_balance(
-                    opponent_id,
-                    amount
-                )
-
-                save_game(
-                    game_id,
-                    creator_rolls,
-                    opponent_rolls,
-                    "finished",
-                    None
-                )
-
-            await context.bot.send_message(
-                chat_id=game["chat_id"],
-                text=(
-                    f"🤝 مساوی شد!\n\n"
-                    f"👤 {creator_id}: {score_creator}\n"
-                    f"👤 {opponent_id}: {score_opponent}\n\n"
-                    f"💰 مبلغ هر دو نفر برگشت داده شد."
-                )
-            )
-
-            await remove_game_lock(
-                game_id
-            )
-
-            return
-
-        if result == 1:
-
-            winner_id = creator_id
-            winner_score = score_creator
-            loser_score = score_opponent
-
-        else:
-
-            winner_id = opponent_id
-            winner_score = score_opponent
-            loser_score = score_creator
-
-        payout = (
-            amount * 2
-            - OWNER_SHARE
-            - BOT_FEE
-        )
-
         async with DB_LOCK:
 
-            credit_balance(
-                winner_id,
-                payout
+            with closing(db()) as con:
+
+                try:
+                    con.execute(
+                        "BEGIN IMMEDIATE"
+                    )
+
+                    game = con.execute("""
+                    SELECT *
+                    FROM games
+                    WHERE id=?
+                    """, (
+                        game_id,
+                    )).fetchone()
+
+                    if not game:
+                        con.execute("ROLLBACK")
+                        return
+
+                    if int(game["settled"]) == 1:
+                        con.execute("ROLLBACK")
+                        return
+
+                    user_id = int(
+                        game["creator_id"]
+                    )
+
+                    amount = D(
+                        game["amount"]
+                    )
+
+                    user_score = calculate_score(
+                        user_rolls
+                    )
+
+                    bot_score = calculate_score(
+                        bot_rolls
+                    )
+
+                    result = winner_from_scores(
+                        user_score,
+                        bot_score
+                    )
+
+                    # ------------------------------------------------
+                    # مساوی
+                    # ------------------------------------------------
+
+                    if result == 0:
+
+                        row = con.execute("""
+                        SELECT balance
+                        FROM users
+                        WHERE user_id=?
+                        """, (
+                            user_id,
+                        )).fetchone()
+
+                        if not row:
+                            con.execute("ROLLBACK")
+                            return
+
+                        balance = D(
+                            row["balance"]
+                        )
+
+                        con.execute("""
+                        UPDATE users
+                        SET balance=?
+                        WHERE user_id=?
+                        """, (
+                            str(balance + amount),
+                            user_id
+                        ))
+
+                        con.execute("""
+                        UPDATE games
+                        SET status='finished',
+                            settled=1,
+                            winner_id=NULL,
+                            opponent_rolls=?,
+                            updated_at=CURRENT_TIMESTAMP
+                        WHERE id=?
+                        """, (
+                            rolls_text(bot_rolls),
+                            game_id
+                        ))
+
+                        con.execute("COMMIT")
+
+                        result_text = (
+                            f"🤝 مساوی شد!\n\n"
+                            f"👤 {user_id}: {user_score}\n"
+                            f"🤖 ربات: {bot_score}\n\n"
+                            f"💰 مبلغ برگشت داده شد."
+                        )
+
+                    # ------------------------------------------------
+                    # کاربر برنده
+                    # ------------------------------------------------
+
+                    elif result == 1:
+
+                        total = amount * 2
+
+                        owner_share = (
+                            amount *
+                            OWNER_SHARE
+                        )
+
+                        fee = (
+                            amount *
+                            BOT_FEE
+                        )
+
+                        payout = (
+                            total *
+                            WINNER_PAYOUT_RATE
+                        )
+
+                        max_payout = (
+                            total -
+                            owner_share -
+                            fee
+                        )
+
+                        if payout > max_payout:
+                            payout = max_payout
+
+                        row = con.execute("""
+                        SELECT balance
+                        FROM users
+                        WHERE user_id=?
+                        """, (
+                            user_id,
+                        )).fetchone()
+
+                        if not row:
+                            con.execute("ROLLBACK")
+                            return
+
+                        balance = D(
+                            row["balance"]
+                        )
+
+                        con.execute("""
+                        UPDATE users
+                        SET balance=?
+                        WHERE user_id=?
+                        """, (
+                            str(balance + payout),
+                            user_id
+                        ))
+
+                        house = con.execute("""
+                        SELECT owner_balance,
+                               fee_balance
+                        FROM house
+                        WHERE id=1
+                        """).fetchone()
+
+                        owner_balance = D(
+                            house["owner_balance"]
+                        )
+
+                        fee_balance = D(
+                            house["fee_balance"]
+                        )
+
+                        con.execute("""
+                        UPDATE house
+                        SET owner_balance=?,
+                            fee_balance=?
+                        WHERE id=1
+                        """, (
+                            str(
+                                owner_balance +
+                                owner_share
+                            ),
+                            str(
+                                fee_balance +
+                                fee
+                            )
+                        ))
+
+                        con.execute("""
+                        UPDATE games
+                        SET status='finished',
+                            settled=1,
+                            winner_id=?,
+                            opponent_rolls=?,
+                            updated_at=CURRENT_TIMESTAMP
+                        WHERE id=?
+                        """, (
+                            user_id,
+                            rolls_text(bot_rolls),
+                            game_id
+                        ))
+
+                        con.execute("COMMIT")
+
+                        result_text = (
+                            f"🏆 نتیجه بازی\n\n"
+                            f"👤 {user_id}: {user_score}\n"
+                            f"🤖 ربات: {bot_score}\n\n"
+                            f"🏆 برنده: {user_id}\n"
+                            f"🎯 امتیاز برنده: {user_score}\n"
+                            f"🎯 امتیاز ربات: {bot_score}\n\n"
+                            f"💰 دریافتی: {money(payout)}"
+                        )
+
+                    # ------------------------------------------------
+                    # ربات برنده
+                    # ------------------------------------------------
+
+                    else:
+
+                        # مبلغ رزروشده کاربر به موجودی خانه منتقل می‌شود
+                        house = con.execute("""
+                        SELECT bot_balance
+                        FROM house
+                        WHERE id=1
+                        """).fetchone()
+
+                        bot_balance = D(
+                            house["bot_balance"]
+                        )
+
+                        con.execute("""
+                        UPDATE house
+                        SET bot_balance=?
+                        WHERE id=1
+                        """, (
+                            str(
+                                bot_balance +
+                                amount
+                            ),
+                        ))
+
+                        con.execute("""
+                        UPDATE games
+                        SET status='finished',
+                            settled=1,
+                            winner_id=NULL,
+                            opponent_rolls=?,
+                            updated_at=CURRENT_TIMESTAMP
+                        WHERE id=?
+                        """, (
+                            rolls_text(bot_rolls),
+                            game_id
+                        ))
+
+                        con.execute("COMMIT")
+
+                        result_text = (
+                            f"🏆 نتیجه بازی\n\n"
+                            f"👤 {user_id}: {user_score}\n"
+                            f"🤖 ربات: {bot_score}\n\n"
+                            f"🏆 برنده: 🤖 ربات\n"
+                            f"🎯 امتیاز برنده: {bot_score}\n"
+                            f"🎯 امتیاز شما: {user_score}"
+                        )
+
+                except Exception:
+
+                    try:
+                        con.execute("ROLLBACK")
+                    except Exception:
+                        pass
+
+                    logger.exception(
+                        "BOT SETTLEMENT FAILED"
+                    )
+
+                    return
+
+        try:
+            await context.bot.send_message(
+                chat_id=game["chat_id"],
+                text=result_text
+            )
+        except Exception:
+            logger.exception(
+                "BOT RESULT SEND FAILED"
             )
 
-            add_house(
-                OWNER_SHARE,
-                BOT_FEE
-            )
-
-            save_game(
-                game_id,
-                creator_rolls,
-                opponent_rolls,
-                "finished",
-                winner_id
-            )
-
-        await context.bot.send_message(
-            chat_id=game["chat_id"],
-            text=(
-                f"🏆 نتیجه بازی\n\n"
-                f"👤 {creator_id}: {score_creator}\n"
-                f"👤 {opponent_id}: {score_opponent}\n\n"
-                f"🏆 برنده: {winner_id}\n"
-                f"🎯 امتیاز برنده: {winner_score}\n"
-                f"🎯 امتیاز حریف: {loser_score}\n\n"
-                f"💰 دریافتی برنده: "
-                f"{money(payout)} TRX"
-            )
-        )
-
-        await remove_game_lock(
-            game_id
-        )
+    await remove_game_lock(game_id)
 
 
 # ============================================================
@@ -2179,15 +2604,12 @@ async def process_user_roll(
     if is_blocked(user.id):
         return
 
-    if not await check_access(
-        update,
-        context
-    ):
-        return
+    chat_id = message.chat_id
 
-    game = None
+    # --------------------------------------------------------
+    # پیدا کردن بازی مناسب
+    # --------------------------------------------------------
 
-    # فقط بازی همان گپ
     with closing(db()) as con:
 
         rows = con.execute("""
@@ -2197,14 +2619,15 @@ async def process_user_roll(
         AND status IN (
             'bot_creator_turn',
             'creator_turn',
-            'opponent_turn',
-            'bot_rolling'
+            'opponent_turn'
         )
         ORDER BY id DESC
         LIMIT 100
         """, (
-            message.chat_id,
+            chat_id,
         )).fetchall()
+
+    game = None
 
     for row in rows:
 
@@ -2218,35 +2641,29 @@ async def process_user_roll(
             else None
         )
 
-        if row["status"] == "bot_creator_turn":
+        status = row["status"]
 
+        if status == "bot_creator_turn":
             if user.id == creator_id:
                 game = row
                 break
 
-        elif row["status"] == "creator_turn":
-
+        elif status == "creator_turn":
             if user.id == creator_id:
                 game = row
                 break
 
-        elif row["status"] == "opponent_turn":
-
+        elif status == "opponent_turn":
             if opponent_id == user.id:
                 game = row
                 break
 
-        elif row["status"] == "bot_rolling":
-
-            # ربات در حال انداختن است.
-            await message.reply_text(
-                f"🤖 ربات درحال بازی است؛ "
-                f"فعلاً پرتاب جدید نکن."
-            )
-            return
-
     if not game:
         return
+
+    game_id = int(
+        game["id"]
+    )
 
     game_type = game["game_type"]
 
@@ -2254,32 +2671,46 @@ async def process_user_roll(
         game_type
     ]
 
+    # --------------------------------------------------------
+    # بررسی نوع پرتاب
+    # --------------------------------------------------------
+
     if dice.emoji != expected_emoji:
 
-        await message.reply_text(
-            f"❌ برای این بازی باید "
-            f"{expected_emoji} بفرستی."
-        )
+        try:
+            await message.reply_text(
+                f"❌ برای این بازی باید "
+                f"{expected_emoji} "
+                f"بفرستی."
+            )
+        except Exception:
+            pass
 
         return
-
-    game_id = int(
-        game["id"]
-    )
 
     lock = await get_game_lock(
         game_id
     )
 
-    # ========================================================
-    # ضد پرتاب همزمان
-    # ========================================================
-
     async with lock:
 
-        game = get_game(game_id)
+        # دوباره از DB بخوان
+        fresh_game = get_game(
+            game_id
+        )
 
-        if not game:
+        if not fresh_game:
+            return
+
+        game = fresh_game
+
+        status = game["status"]
+
+        if status not in (
+            "bot_creator_turn",
+            "creator_turn",
+            "opponent_turn"
+        ):
             return
 
         rounds = int(
@@ -2294,11 +2725,15 @@ async def process_user_roll(
             game["opponent_rolls"]
         )
 
+        value = int(
+            dice.value
+        )
+
         # ====================================================
         # BOT GAME
         # ====================================================
 
-        if game["status"] == "bot_creator_turn":
+        if status == "bot_creator_turn":
 
             if user.id != int(
                 game["creator_id"]
@@ -2309,126 +2744,281 @@ async def process_user_roll(
                 return
 
             creator_rolls.append(
-                int(dice.value)
+                value
             )
 
-            save_game(
-                game_id,
-                creator_rolls=creator_rolls
-            )
+            # هنوز تمام نشده
+            if len(creator_rolls) < rounds:
 
-            remaining = (
-                rounds -
-                len(creator_rolls)
-            )
+                with closing(db()) as con:
 
-            if remaining > 0:
+                    con.execute("""
+                    UPDATE games
+                    SET creator_rolls=?,
+                        updated_at=CURRENT_TIMESTAMP
+                    WHERE id=?
+                    AND status='bot_creator_turn'
+                    """, (
+                        rolls_text(
+                            creator_rolls
+                        ),
+                        game_id
+                    ))
 
-                await message.reply_text(
-                    f"👤 {name_of(user)}: "
-                    f"{dice.value}\n\n"
-                    f"🎯 {remaining} پرتاب باقی مانده."
+                    con.commit()
+
+                remaining = (
+                    rounds -
+                    len(creator_rolls)
                 )
+
+                try:
+                    await message.reply_text(
+                        f"👤 {name_of(user)}: {value}\n"
+                        f"🎯 {remaining} پرتاب باقی مانده."
+                    )
+                except Exception:
+                    pass
 
                 return
 
-            # -----------------------------------------------
-            # تمام پرتاب‌های کاربر انجام شد.
-            # -----------------------------------------------
+            # ------------------------------------------------
+            # پرتاب‌های کاربر تمام شد
+            # ------------------------------------------------
 
-            save_game(
-                game_id,
-                creator_rolls=creator_rolls,
-                status="bot_rolling"
-            )
+            with closing(db()) as con:
 
-            await message.reply_text(
-                f"🤖 {name_of(user)} تمام پرتاب‌ها را انجام داد.\n\n"
-                f"🤖 حالا ربات خودش "
-                f"{rounds} بار "
-                f"{expected_emoji} می‌اندازد..."
-            )
+                con.execute("""
+                UPDATE games
+                SET creator_rolls=?,
+                    status='bot_rolling',
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE id=?
+                AND status='bot_creator_turn'
+                """, (
+                    rolls_text(
+                        creator_rolls
+                    ),
+                    game_id
+                ))
+
+                con.commit()
+
+            try:
+                await message.reply_text(
+                    f"👤 {name_of(user)}: {value}\n\n"
+                    f"🤖 حالا نوبت ربات است..."
+                )
+            except Exception:
+                pass
+
+            # ------------------------------------------------
+            # ربات خودش پرتاب می‌کند
+            # ------------------------------------------------
 
             bot_rolls = []
 
-            try:
+            for index in range(rounds):
 
-                for index in range(rounds):
-
-                    # اگر بازی قبلاً تمام شده، متوقف شو
-                    current = get_game(
-                        game_id
-                    )
-
-                    if not current:
-                        return
-
-                    if current["status"] != "bot_rolling":
-                        return
-
-                    value = await safe_send_dice(
-                        context,
-                        message.chat_id,
-                        expected_emoji,
-                        retries=4
-                    )
-
-                    bot_rolls.append(
-                        int(value)
-                    )
-
-                    # ذخیره بعد از هر پرتاب
-                    save_game(
-                        game_id,
-                        opponent_rolls=bot_rolls
-                    )
-
-                    await asyncio.sleep(
-                        0.7
-                    )
-
-                # -------------------------------------------
-                # حتماً نتیجه را بعد از آخرین پرتاب اعلام کن
-                # -------------------------------------------
-
-                save_game(
-                    game_id,
-                    opponent_rolls=bot_rolls,
-                    status="finished"
-                )
-
-                # finish دوباره بازی را بررسی می‌کند
-                await finish_bot_game(
-                    context,
-                    game_id,
-                    creator_rolls,
-                    bot_rolls
-                )
-
-            except Exception as e:
-
-                logger.exception(
-                    "BOT ROLLING CRASH game=%s",
+                # بررسی اینکه بازی هنوز bot_rolling است
+                current = get_game(
                     game_id
                 )
 
-                # بازی گیر نکند؛ پول برگردد
-                await refund_bot_game(
-                    context,
-                    game_id,
-                    int(game["creator_id"]),
-                    D(game["amount"]),
-                    message.chat_id,
-                    "ربات نتوانست پرتاب را کامل کند."
+                if not current:
+                    return
+
+                if current["status"] != "bot_rolling":
+                    return
+
+                bot_value = await send_game_dice(
+                    context.bot,
+                    chat_id,
+                    expected_emoji
                 )
+
+                # اگر Telegram خطا داد، بازی را نیمه‌کاره رها نکن
+                if bot_value is None:
+
+                    # بازی را به حالت قابل بازیابی برگردان
+                    with closing(db()) as con:
+
+                        con.execute("""
+                        UPDATE games
+                        SET status='bot_retry',
+                            opponent_rolls=?,
+                            updated_at=CURRENT_TIMESTAMP
+                        WHERE id=?
+                        """, (
+                            rolls_text(
+                                bot_rolls
+                            ),
+                            game_id
+                        ))
+
+                        con.commit()
+
+                    try:
+                        await message.reply_text(
+                            "⚠️ یک خطای موقت در پرتاب ربات رخ داد.\n"
+                            "بازی حذف نشد و مبلغ شما محفوظ است.\n"
+                            "دوباره تلاش می‌شود."
+                        )
+                    except Exception:
+                        pass
+
+                    # retry محدود
+                    for retry in range(3):
+
+                        await asyncio.sleep(2)
+
+                        bot_value = await send_game_dice(
+                            context.bot,
+                            chat_id,
+                            expected_emoji
+                        )
+
+                        if bot_value is not None:
+                            break
+
+                    if bot_value is None:
+
+                        # در صورت شکست کامل، مبلغ کاربر برگردد
+                        async with DB_LOCK:
+
+                            with closing(db()) as con:
+
+                                try:
+                                    con.execute(
+                                        "BEGIN IMMEDIATE"
+                                    )
+
+                                    current = con.execute("""
+                                    SELECT *
+                                    FROM games
+                                    WHERE id=?
+                                    """, (
+                                        game_id,
+                                    )).fetchone()
+
+                                    if (
+                                        current and
+                                        int(current["settled"]) == 0
+                                    ):
+
+                                        row = con.execute("""
+                                        SELECT balance
+                                        FROM users
+                                        WHERE user_id=?
+                                        """, (
+                                            user.id,
+                                        )).fetchone()
+
+                                        if row:
+
+                                            balance = D(
+                                                row["balance"]
+                                            )
+
+                                            con.execute("""
+                                            UPDATE users
+                                            SET balance=?
+                                            WHERE user_id=?
+                                            """, (
+                                                str(
+                                                    balance +
+                                                    D(current["amount"])
+                                                ),
+                                                user.id
+                                            ))
+
+                                        con.execute("""
+                                        UPDATE games
+                                        SET status='cancelled',
+                                            settled=1,
+                                            updated_at=CURRENT_TIMESTAMP
+                                        WHERE id=?
+                                        """, (
+                                            game_id,
+                                        ))
+
+                                    con.execute("COMMIT")
+
+                                except Exception:
+                                    try:
+                                        con.execute(
+                                            "ROLLBACK"
+                                        )
+                                    except Exception:
+                                        pass
+
+                        try:
+                            await message.reply_text(
+                                "❌ پرتاب ربات انجام نشد.\n"
+                                "💰 مبلغ بازی به شما برگشت داده شد."
+                            )
+                        except Exception:
+                            pass
+
+                        return
+
+                bot_rolls.append(
+                    int(bot_value)
+                )
+
+                with closing(db()) as con:
+
+                    con.execute("""
+                    UPDATE games
+                    SET opponent_rolls=?,
+                        updated_at=CURRENT_TIMESTAMP
+                    WHERE id=?
+                    """, (
+                        rolls_text(
+                            bot_rolls
+                        ),
+                        game_id
+                    ))
+
+                    con.commit()
+
+                await asyncio.sleep(0.7)
+
+            # ------------------------------------------------
+            # نتیجه
+            # ------------------------------------------------
+
+            with closing(db()) as con:
+
+                con.execute("""
+                UPDATE games
+                SET status='finished',
+                    opponent_rolls=?,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE id=?
+                """, (
+                    rolls_text(
+                        bot_rolls
+                    ),
+                    game_id
+                ))
+
+                con.commit()
+
+            await settle_bot_game(
+                context,
+                game_id,
+                creator_rolls,
+                bot_rolls
+            )
 
             return
 
         # ====================================================
-        # FRIEND CREATOR
+        # FRIEND - CREATOR
         # ====================================================
 
-        if game["status"] == "creator_turn":
+        if status == "creator_turn":
 
             if user.id != int(
                 game["creator_id"]
@@ -2439,67 +3029,110 @@ async def process_user_roll(
                 return
 
             creator_rolls.append(
-                int(dice.value)
+                value
             )
 
             if len(creator_rolls) < rounds:
 
-                save_game(
-                    game_id,
-                    creator_rolls=creator_rolls
+                with closing(db()) as con:
+
+                    con.execute("""
+                    UPDATE games
+                    SET creator_rolls=?,
+                        updated_at=CURRENT_TIMESTAMP
+                    WHERE id=?
+                    AND status='creator_turn'
+                    """, (
+                        rolls_text(
+                            creator_rolls
+                        ),
+                        game_id
+                    ))
+
+                    con.commit()
+
+                remaining = (
+                    rounds -
+                    len(creator_rolls)
                 )
 
-                await message.reply_text(
-                    f"👤 {name_of(user)}: "
-                    f"{dice.value}\n"
-                    f"🎯 {rounds-len(creator_rolls)} "
-                    f"پرتاب باقی مانده."
-                )
+                try:
+                    await message.reply_text(
+                        f"👤 {name_of(user)}: {value}\n"
+                        f"🎯 {remaining} پرتاب باقی مانده."
+                    )
+                except Exception:
+                    pass
 
                 return
 
-            save_game(
-                game_id,
-                creator_rolls=creator_rolls,
-                status="opponent_turn"
-            )
+            # ------------------------------------------------
+            # creator finished
+            # ------------------------------------------------
+
+            with closing(db()) as con:
+
+                con.execute("""
+                UPDATE games
+                SET creator_rolls=?,
+                    status='opponent_turn',
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE id=?
+                AND status='creator_turn'
+                """, (
+                    rolls_text(
+                        creator_rolls
+                    ),
+                    game_id
+                ))
+
+                con.commit()
 
             opponent_id = int(
                 game["opponent_id"]
             )
 
-            try:
+            opponent_name = str(
+                opponent_id
+            )
 
-                member = await context.bot.get_chat(
+            try:
+                opponent_chat = await context.bot.get_chat(
                     opponent_id
                 )
 
                 opponent_name = (
-                    member.first_name
-                    or member.username
+                    opponent_chat.first_name
+                    or (
+                        "@" +
+                        opponent_chat.username
+                        if opponent_chat.username
+                        else None
+                    )
                     or str(opponent_id)
                 )
 
             except Exception:
+                pass
 
-                opponent_name = str(
-                    opponent_id
+            try:
+                await message.reply_text(
+                    f"👤 {name_of(user)} پرتاب‌های خودش را کامل کرد.\n\n"
+                    f"🎯 حالا حریف، {opponent_name}، "
+                    f"باید خودش {rounds} بار "
+                    f"{expected_emoji} بفرستد.\n\n"
+                    f"🤖 ربات به جای حریف پرتاب نمی‌کند."
                 )
-
-            await message.reply_text(
-                f"👤 {name_of(user)} پرتاب‌های خودش را کامل کرد.\n\n"
-                f"🎯 حالا {opponent_name} خودش "
-                f"{rounds} بار "
-                f"{expected_emoji} بیندازد."
-            )
+            except Exception:
+                pass
 
             return
 
         # ====================================================
-        # FRIEND OPPONENT
+        # FRIEND - OPPONENT
         # ====================================================
 
-        if game["status"] == "opponent_turn":
+        if status == "opponent_turn":
 
             opponent_id = int(
                 game["opponent_id"]
@@ -2512,59 +3145,287 @@ async def process_user_roll(
                 return
 
             opponent_rolls.append(
-                int(dice.value)
+                value
             )
 
             if len(opponent_rolls) < rounds:
 
-                save_game(
-                    game_id,
-                    opponent_rolls=opponent_rolls
+                with closing(db()) as con:
+
+                    con.execute("""
+                    UPDATE games
+                    SET opponent_rolls=?,
+                        updated_at=CURRENT_TIMESTAMP
+                    WHERE id=?
+                    AND status='opponent_turn'
+                    """, (
+                        rolls_text(
+                            opponent_rolls
+                        ),
+                        game_id
+                    ))
+
+                    con.commit()
+
+                remaining = (
+                    rounds -
+                    len(opponent_rolls)
                 )
 
-                await message.reply_text(
-                    f"👤 {name_of(user)}: "
-                    f"{dice.value}\n"
-                    f"🎯 {rounds-len(opponent_rolls)} "
-                    f"پرتاب باقی مانده."
-                )
+                try:
+                    await message.reply_text(
+                        f"👤 {name_of(user)}: {value}\n"
+                        f"🎯 {remaining} پرتاب باقی مانده."
+                    )
+                except Exception:
+                    pass
 
                 return
 
-            save_game(
+            # ------------------------------------------------
+            # opponent finished
+            # ------------------------------------------------
+
+            with closing(db()) as con:
+
+                con.execute("""
+                UPDATE games
+                SET opponent_rolls=?,
+                    status='finished',
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE id=?
+                AND status='opponent_turn'
+                """, (
+                    rolls_text(
+                        opponent_rolls
+                    ),
+                    game_id
+                ))
+
+                con.commit()
+
+            await settle_friend_game(
+                context,
                 game_id,
-                opponent_rolls=opponent_rolls,
-                status="finished"
+                creator_rolls,
+                opponent_rolls
             )
 
-            try:
 
-                await finish_friend_game(
-                    context,
-                    game_id,
-                    creator_rolls,
-                    opponent_rolls
+# ============================================================
+# RECOVER STALE GAMES
+# ============================================================
+
+async def recover_stale_games(
+    application
+):
+
+    """
+    اگر بات ری‌استارت شد و بازی وسط کار ماند:
+    مبلغ رزروشده از بین نمی‌رود.
+    بازی‌های قدیمی لغو و مبلغ به سازنده برگردانده می‌شود.
+    """
+
+    while True:
+
+        try:
+
+            with closing(db()) as con:
+
+                rows = con.execute("""
+                SELECT *
+                FROM games
+                WHERE settled=0
+                AND status IN (
+                    'waiting',
+                    'bot_creator_turn',
+                    'bot_rolling',
+                    'bot_retry',
+                    'creator_turn',
+                    'opponent_turn'
+                )
+                """).fetchall()
+
+            for game in rows:
+
+                try:
+                    created = datetime.fromisoformat(
+                        game["created_at"]
+                    )
+                except Exception:
+                    continue
+
+                age = (
+                    datetime.utcnow() -
+                    created
+                ).total_seconds()
+
+                if age < (
+                    STALE_GAME_HOURS *
+                    3600
+                ):
+                    continue
+
+                game_id = int(
+                    game["id"]
                 )
 
-            except Exception:
-
-                logger.exception(
-                    "FRIEND FINISH ERROR"
+                lock = await get_game_lock(
+                    game_id
                 )
 
-                await message.reply_text(
-                    "⚠️ نتیجه بازی با خطا مواجه شد؛ "
-                    "لطفاً ادمین وضعیت بازی را بررسی کند."
-                )
+                async with lock:
 
-            return
+                    async with DB_LOCK:
+
+                        with closing(db()) as con:
+
+                            try:
+                                con.execute(
+                                    "BEGIN IMMEDIATE"
+                                )
+
+                                current = con.execute("""
+                                SELECT *
+                                FROM games
+                                WHERE id=?
+                                """, (
+                                    game_id,
+                                )).fetchone()
+
+                                if (
+                                    not current or
+                                    int(current["settled"]) == 1
+                                ):
+                                    con.execute(
+                                        "ROLLBACK"
+                                    )
+                                    continue
+
+                                creator_id = int(
+                                    current["creator_id"]
+                                )
+
+                                amount = D(
+                                    current["amount"]
+                                )
+
+                                row = con.execute("""
+                                SELECT balance
+                                FROM users
+                                WHERE user_id=?
+                                """, (
+                                    creator_id,
+                                )).fetchone()
+
+                                if row:
+
+                                    balance = D(
+                                        row["balance"]
+                                    )
+
+                                    con.execute("""
+                                    UPDATE users
+                                    SET balance=?
+                                    WHERE user_id=?
+                                    """, (
+                                        str(
+                                            balance +
+                                            amount
+                                        ),
+                                        creator_id
+                                    ))
+
+                                # اگر حریف پول داده باشد
+                                if current["opponent_id"]:
+
+                                    opponent_id = int(
+                                        current["opponent_id"]
+                                    )
+
+                                    opponent = con.execute("""
+                                    SELECT balance
+                                    FROM users
+                                    WHERE user_id=?
+                                    """, (
+                                        opponent_id,
+                                    )).fetchone()
+
+                                    if opponent:
+
+                                        balance = D(
+                                            opponent["balance"]
+                                        )
+
+                                        con.execute("""
+                                        UPDATE users
+                                        SET balance=?
+                                        WHERE user_id=?
+                                        """, (
+                                            str(
+                                                balance +
+                                                amount
+                                            ),
+                                            opponent_id
+                                        ))
+
+                                con.execute("""
+                                UPDATE games
+                                SET status='cancelled',
+                                    settled=1,
+                                    updated_at=CURRENT_TIMESTAMP
+                                WHERE id=?
+                                """, (
+                                    game_id,
+                                ))
+
+                                con.execute("COMMIT")
+
+                            except Exception:
+
+                                try:
+                                    con.execute(
+                                        "ROLLBACK"
+                                    )
+                                except Exception:
+                                    pass
+
+                                logger.exception(
+                                    "STALE GAME RECOVERY ERROR"
+                                )
+
+                    try:
+                        await application.bot.send_message(
+                            chat_id=game["chat_id"],
+                            text=(
+                                "🛡️ یک بازی نیمه‌کاره به‌دلیل "
+                                "گذشت زمان لغو شد.\n"
+                                "💰 مبلغ بازیکنان برگشت داده شد."
+                            )
+                        )
+                    except Exception:
+                        pass
+
+                    await remove_game_lock(
+                        game_id
+                    )
+
+        except Exception:
+            logger.exception(
+                "RECOVERY LOOP ERROR"
+            )
+
+        await asyncio.sleep(300)
 
 
 # ============================================================
 # TRANSFER
 # ============================================================
 
-async def transfer(update, context):
+async def transfer_command(
+    update,
+    context
+):
 
     message = update.effective_message
     user = update.effective_user
@@ -2572,28 +3433,40 @@ async def transfer(update, context):
     if not message or not user:
         return
 
-    if not await check_access(
+    if not await require_join(
         update,
         context
     ):
         return
 
+    ensure_user(user)
+
     if not message.reply_to_message:
 
         await message.reply_text(
-            "💸 روی پیام کاربر Reply کن.\n\n"
+            "💸 برای انتقال باید روی پیام کاربر Reply کنی.\n\n"
             "مثال:\n"
             "انتقال 0.5"
         )
 
         return
 
-    target = message.reply_to_message.from_user
+    target = (
+        message.reply_to_message.from_user
+    )
 
-    if not target or target.id == user.id:
+    if not target:
 
         await message.reply_text(
-            "❌ مقصد نامعتبر است."
+            "❌ مقصد پیدا نشد."
+        )
+
+        return
+
+    if target.id == user.id:
+
+        await message.reply_text(
+            "❌ نمی‌توانی به خودت انتقال بدهی."
         )
 
         return
@@ -2613,7 +3486,8 @@ async def transfer(update, context):
     if amount is None:
 
         await message.reply_text(
-            "❌ مقدار نامعتبر."
+            "❌ مقدار نامعتبر است.\n"
+            "مثال: انتقال 0.5"
         )
 
         return
@@ -2622,51 +3496,90 @@ async def transfer(update, context):
 
     async with DB_LOCK:
 
-        if not debit_balance(
+        ok = transfer_atomic(
             user.id,
-            amount
-        ):
-
-            await message.reply_text(
-                "❌ موجودی کافی نیست."
-            )
-
-            return
-
-        if not credit_balance(
             target.id,
             amount
-        ):
+        )
 
-            credit_balance(
-                user.id,
-                amount
-            )
+    if not ok:
 
-            await message.reply_text(
-                "❌ انتقال انجام نشد؛ مبلغ برگشت داده شد."
-            )
+        await message.reply_text(
+            "❌ انتقال انجام نشد.\n"
+            "ممکن است موجودی کافی نباشد."
+        )
 
-            return
-
-        with closing(db()) as con:
-
-            con.execute("""
-            INSERT INTO transfers
-            (sender_id, receiver_id, amount)
-            VALUES (?, ?, ?)
-            """, (
-                user.id,
-                target.id,
-                str(amount)
-            ))
-
-            con.commit()
+        return
 
     await message.reply_text(
         f"✅ انتقال انجام شد.\n\n"
         f"👤 مقصد: {name_of(target)}\n"
-        f"💸 مقدار: {money(amount)} TRX"
+        f"💰 مقدار: {money(amount)}"
+    )
+
+
+# ============================================================
+# REFERRAL INFO
+# ============================================================
+
+async def referral_menu(
+    update,
+    context
+):
+
+    user = update.effective_user
+
+    if not user:
+        return
+
+    if not await require_join(
+        update,
+        context
+    ):
+        return
+
+    ensure_user(user)
+
+    bot_username = None
+
+    try:
+        me = await context.bot.get_me()
+        bot_username = me.username
+    except Exception:
+        pass
+
+    if bot_username:
+
+        link = (
+            f"https://t.me/"
+            f"{bot_username}"
+            f"?start={user.id}"
+        )
+
+    else:
+        link = (
+            f"/start {user.id}"
+        )
+
+    with closing(db()) as con:
+
+        row = con.execute("""
+        SELECT COUNT(*)
+        FROM users
+        WHERE referred_by=?
+        """, (
+            user.id,
+        )).fetchone()
+
+        count = int(
+            row[0]
+        )
+
+    await update.effective_message.reply_text(
+        "👥 زیرمجموعه\n\n"
+        f"🔗 لینک شما:\n{link}\n\n"
+        f"👥 تعداد زیرمجموعه: {count}\n"
+        f"🎁 پاداش هر زیرمجموعه: {money(REFERRAL_REWARD)}"
     )
 
 
@@ -2674,21 +3587,26 @@ async def transfer(update, context):
 # REQUEST
 # ============================================================
 
-async def request_menu(update, context):
+async def request_menu(
+    update,
+    context
+):
 
-    if not await check_access(
+    if not await require_join(
         update,
         context
     ):
         return
 
+    user = update.effective_user
+
     context.user_data["request_mode"] = "amount"
 
     await update.effective_message.reply_text(
         "📤 درخواست\n\n"
+        "مقدار را بفرست.\n"
         "مثال:\n"
-        "درخواست 5\n\n"
-        "بعد از ثبت مقدار، اطلاعات درخواست را بفرست."
+        "5"
     )
 
 
@@ -2717,9 +3635,12 @@ async def create_request(
 # HELP
 # ============================================================
 
-async def help_command(update, context):
+async def help_command(
+    update,
+    context
+):
 
-    if not await check_access(
+    if not await require_join(
         update,
         context
     ):
@@ -2727,18 +3648,21 @@ async def help_command(update, context):
 
     await update.effective_message.reply_text(
         "📖 راهنما\n\n"
-        "🎮 ساخت بازی در گپ:\n"
+        "🎮 ساخت بازی:\n"
         "1 تاس 0.5\n"
         "2 تاس 0.5\n"
         "1 بولینگ 0.5\n"
         "2 بسکتبال 0.5\n"
         "3 دارت 0.5\n\n"
+        "🤖 بازی با ربات:\n"
+        "اول خودت پرتاب می‌کنی؛ سپس ربات خودش پرتاب می‌کند.\n\n"
+        "👥 بازی دوستان:\n"
+        "سازنده خودش پرتاب می‌کند؛ سپس حریف خودش پرتاب می‌کند.\n\n"
         "💰 موجودی\n"
-        "💸 انتقال 0.5 ← با Reply\n"
-        "👥 بازی با دوستان\n"
-        "🤖 بازی با ربات\n"
+        "💸 انتقال 0.5 با Reply\n"
+        "👥 زیرمجموعه\n"
         "📤 درخواست\n\n"
-        "تعداد بازی و پرتاب محدودیت ندارد."
+        "🛡️ بازی‌ها تعداد محدود ندارند."
     )
 
 
@@ -2773,26 +3697,23 @@ def admin_keyboard():
                 "📋 درخواست‌ها",
                 callback_data="admin_requests"
             )
-        ],
-        [
-            InlineKeyboardButton(
-                "🔄 وضعیت برداشت",
-                callback_data="admin_withdraw_toggle"
-            )
         ]
     ])
 
 
-async def admin(update, context):
+async def admin_command(
+    update,
+    context
+):
 
     user = update.effective_user
 
-    if not user or not is_admin(user.id):
-
+    if not user or not is_admin(
+        user.id
+    ):
         await update.effective_message.reply_text(
             "⛔ دسترسی ندارید."
         )
-
         return
 
     await update.effective_message.reply_text(
@@ -2801,23 +3722,30 @@ async def admin(update, context):
     )
 
 
-async def admin_callback(update, context):
+async def admin_callback(
+    update,
+    context
+):
 
     query = update.callback_query
+    user = query.from_user
 
     await query.answer()
 
-    user = query.from_user
-
-    if not is_admin(user.id):
-
-        await query.edit_message_text(
-            "⛔ دسترسی ندارید."
+    if not is_admin(
+        user.id
+    ):
+        await query.answer(
+            "⛔ دسترسی ندارید.",
+            show_alert=True
         )
-
         return
 
     data = query.data
+
+    # --------------------------------------------------------
+    # USERS
+    # --------------------------------------------------------
 
     if data == "admin_users":
 
@@ -2836,28 +3764,33 @@ async def admin_callback(update, context):
 
         text = "👥 کاربران\n\n"
 
-        for i, row in enumerate(
+        for index, row in enumerate(
             rows,
             1
         ):
 
-            name = (
+            display = (
                 row["first_name"]
-                or row["username"]
+                or (
+                    "@" +
+                    row["username"]
+                    if row["username"]
+                    else None
+                )
                 or str(row["user_id"])
             )
 
             status = (
                 "🚫"
-                if row["blocked"]
+                if int(row["blocked"])
                 else
                 "✅"
             )
 
             text += (
-                f"{i}. {status} {name}\n"
+                f"{index}. {status} {display}\n"
                 f"ID: {row['user_id']}\n"
-                f"💰 {money(row['balance'])} TRX\n\n"
+                f"💰 {money(row['balance'])}\n\n"
             )
 
         await query.edit_message_text(
@@ -2865,6 +3798,10 @@ async def admin_callback(update, context):
         )
 
         return
+
+    # --------------------------------------------------------
+    # STATS
+    # --------------------------------------------------------
 
     if data == "admin_stats":
 
@@ -2874,69 +3811,75 @@ async def admin_callback(update, context):
                 "SELECT COUNT(*) FROM users"
             ).fetchone()[0]
 
-            total = con.execute(
-                "SELECT SUM(CAST(balance AS REAL)) "
-                "FROM users"
-            ).fetchone()[0] or 0
-
             games = con.execute(
                 "SELECT COUNT(*) FROM games"
             ).fetchone()[0]
 
-            active = con.execute("""
+            total = con.execute("""
+            SELECT SUM(CAST(balance AS REAL))
+            FROM users
+            """).fetchone()[0] or 0
+
+            pending = con.execute("""
             SELECT COUNT(*)
-            FROM games
-            WHERE status NOT IN
-            ('finished','cancelled','refunded')
+            FROM requests
+            WHERE status='pending'
             """).fetchone()[0]
+
+            house = con.execute("""
+            SELECT owner_balance,
+                   fee_balance,
+                   bot_balance
+            FROM house
+            WHERE id=1
+            """).fetchone()
 
         await query.edit_message_text(
             "📊 آمار\n\n"
             f"👥 کاربران: {users:,}\n"
-            f"💰 موجودی کاربران: {money(total)} TRX\n"
-            f"🎮 کل بازی‌ها: {games:,}\n"
-            f"🔥 بازی‌های فعال: {active:,}\n"
-            f"📥 برداشت: "
-            f"{'روشن 🟢' if withdraw_enabled() else 'خاموش 🔴'}"
+            f"🎮 بازی‌ها: {games:,}\n"
+            f"💰 موجودی کاربران: {money(total)}\n"
+            f"📋 درخواست‌ها: {pending:,}\n\n"
+            f"👑 سهم مالک: {money(house['owner_balance'])}\n"
+            f"💼 کارمزد: {money(house['fee_balance'])}\n"
+            f"🤖 موجودی ربات: {money(house['bot_balance'])}"
         )
 
         return
 
-    if data == "admin_withdraw_toggle":
-
-        new_value = not withdraw_enabled()
-
-        set_setting(
-            "withdraw_enabled",
-            "1" if new_value else "0"
-        )
-
-        await query.edit_message_text(
-            "👑 پنل مدیریت\n\n"
-            f"📥 برداشت: "
-            f"{'روشن 🟢' if new_value else 'خاموش 🔴'}",
-            reply_markup=admin_keyboard()
-        )
-
-        return
+    # --------------------------------------------------------
+    # ADD
+    # --------------------------------------------------------
 
     if data == "admin_add":
 
         await query.edit_message_text(
             "➕ افزایش موجودی\n\n"
-            "/addbalance USER_ID AMOUNT"
+            "/addbalance USER_ID AMOUNT\n\n"
+            "مثال:\n"
+            "/addbalance 123456789 10"
         )
 
         return
+
+    # --------------------------------------------------------
+    # REMOVE
+    # --------------------------------------------------------
 
     if data == "admin_remove":
 
         await query.edit_message_text(
             "➖ کاهش موجودی\n\n"
-            "/removebalance USER_ID AMOUNT"
+            "/removebalance USER_ID AMOUNT\n\n"
+            "مثال:\n"
+            "/removebalance 123456789 10"
         )
 
         return
+
+    # --------------------------------------------------------
+    # REQUESTS
+    # --------------------------------------------------------
 
     if data == "admin_requests":
 
@@ -2965,7 +3908,7 @@ async def admin_callback(update, context):
             text += (
                 f"#{row['id']}\n"
                 f"👤 {row['user_id']}\n"
-                f"💰 {money(row['amount'])} TRX\n"
+                f"💰 {money(row['amount'])}\n"
                 f"📝 {row['wallet']}\n\n"
             )
 
@@ -2978,11 +3921,16 @@ async def admin_callback(update, context):
 # ADMIN BALANCE
 # ============================================================
 
-async def add_balance(update, context):
+async def add_balance(
+    update,
+    context
+):
 
     user = update.effective_user
 
-    if not user or not is_admin(user.id):
+    if not user or not is_admin(
+        user.id
+    ):
         return
 
     if len(context.args) != 2:
@@ -2990,7 +3938,6 @@ async def add_balance(update, context):
         await update.message.reply_text(
             "/addbalance USER_ID AMOUNT"
         )
-
         return
 
     try:
@@ -3006,7 +3953,6 @@ async def add_balance(update, context):
         )
 
     except Exception:
-
         amount = None
 
     if amount is None:
@@ -3014,15 +3960,15 @@ async def add_balance(update, context):
         await update.message.reply_text(
             "❌ مقدار نامعتبر."
         )
-
         return
 
-    if not get_user(target_id):
+    if not get_user(
+        target_id
+    ):
 
         await update.message.reply_text(
             "❌ کاربر پیدا نشد."
         )
-
         return
 
     credit_balance(
@@ -3031,19 +3977,23 @@ async def add_balance(update, context):
     )
 
     await update.message.reply_text(
-        f"✅ افزایش انجام شد.\n\n"
+        f"✅ موجودی افزایش یافت.\n\n"
         f"👤 {target_id}\n"
-        f"➕ {money(amount)} TRX\n"
-        f"💰 موجودی جدید: "
-        f"{money(get_balance(target_id))} TRX"
+        f"➕ {money(amount)}\n"
+        f"💰 جدید: {money(get_balance(target_id))}"
     )
 
 
-async def remove_balance(update, context):
+async def remove_balance(
+    update,
+    context
+):
 
     user = update.effective_user
 
-    if not user or not is_admin(user.id):
+    if not user or not is_admin(
+        user.id
+    ):
         return
 
     if len(context.args) != 2:
@@ -3051,7 +4001,6 @@ async def remove_balance(update, context):
         await update.message.reply_text(
             "/removebalance USER_ID AMOUNT"
         )
-
         return
 
     try:
@@ -3067,7 +4016,6 @@ async def remove_balance(update, context):
         )
 
     except Exception:
-
         amount = None
 
     if amount is None:
@@ -3075,15 +4023,15 @@ async def remove_balance(update, context):
         await update.message.reply_text(
             "❌ مقدار نامعتبر."
         )
-
         return
 
-    if not get_user(target_id):
+    if not get_user(
+        target_id
+    ):
 
         await update.message.reply_text(
             "❌ کاربر پیدا نشد."
         )
-
         return
 
     if not debit_balance(
@@ -3094,15 +4042,13 @@ async def remove_balance(update, context):
         await update.message.reply_text(
             "❌ موجودی کافی نیست."
         )
-
         return
 
     await update.message.reply_text(
-        f"✅ کاهش انجام شد.\n\n"
+        f"✅ موجودی کاهش یافت.\n\n"
         f"👤 {target_id}\n"
-        f"➖ {money(amount)} TRX\n"
-        f"💰 موجودی جدید: "
-        f"{money(get_balance(target_id))} TRX"
+        f"➖ {money(amount)}\n"
+        f"💰 جدید: {money(get_balance(target_id))}"
     )
 
 
@@ -3110,11 +4056,16 @@ async def remove_balance(update, context):
 # BLOCK
 # ============================================================
 
-async def block(update, context):
+async def block_command(
+    update,
+    context
+):
 
     user = update.effective_user
 
-    if not user or not is_admin(user.id):
+    if not user or not is_admin(
+        user.id
+    ):
         return
 
     if len(context.args) != 1:
@@ -3146,11 +4097,16 @@ async def block(update, context):
     )
 
 
-async def unblock(update, context):
+async def unblock_command(
+    update,
+    context
+):
 
     user = update.effective_user
 
-    if not user or not is_admin(user.id):
+    if not user or not is_admin(
+        user.id
+    ):
         return
 
     if len(context.args) != 1:
@@ -3183,10 +4139,49 @@ async def unblock(update, context):
 
 
 # ============================================================
+# JOIN CALLBACK
+# ============================================================
+
+async def check_join_callback(
+    update,
+    context
+):
+
+    query = update.callback_query
+
+    await query.answer()
+
+    user = query.from_user
+
+    ok = await check_membership(
+        context.bot,
+        user.id
+    )
+
+    if ok:
+
+        await query.message.reply_text(
+            "✅ عضویت تأیید شد.\n"
+            "حالا می‌توانی از ربات استفاده کنی.",
+            reply_markup=main_keyboard()
+        )
+
+    else:
+
+        await query.answer(
+            "❌ هنوز عضو کانال نیستی.",
+            show_alert=True
+        )
+
+
+# ============================================================
 # TEXT HANDLER
 # ============================================================
 
-async def text_handler(update, context):
+async def text_handler(
+    update,
+    context
+):
 
     message = update.message
     user = update.effective_user
@@ -3196,20 +4191,25 @@ async def text_handler(update, context):
 
     ensure_user(user)
 
-    if is_blocked(user.id):
-        return
-
-    if not await check_access(
+    if not await require_join(
         update,
         context
     ):
         return
 
-    text = message.text.strip()
-    normalized = normalize_digits(text)
+    if is_blocked(user.id):
+        return
+
+    text = (
+        message.text or ""
+    ).strip()
+
+    normalized = normalize_digits(
+        text
+    )
 
     # --------------------------------------------------------
-    # درخواست
+    # REQUEST MODE
     # --------------------------------------------------------
 
     request_mode = context.user_data.get(
@@ -3262,7 +4262,7 @@ async def text_handler(update, context):
             return
 
     # --------------------------------------------------------
-    # ساخت بازی
+    # GAME CREATION
     # --------------------------------------------------------
 
     parsed = parse_game(
@@ -3271,12 +4271,12 @@ async def text_handler(update, context):
 
     if parsed:
 
-        game, rounds, amount = parsed
+        game_type, rounds, amount = parsed
 
-        await create_game_message(
+        await create_game(
             update,
             context,
-            game,
+            game_type,
             rounds,
             amount
         )
@@ -3284,15 +4284,15 @@ async def text_handler(update, context):
         return
 
     # --------------------------------------------------------
-    # موجودی
+    # BALANCE
     # --------------------------------------------------------
 
-    if text in (
-        "💰 موجودی",
+    if normalized.lower() in (
         "موجودی",
         "موجودی ترون",
-        "موجودی TRX",
-        "balance"
+        "balance",
+        "💰 موجودی",
+        "💰موجودی"
     ):
 
         await show_balance(
@@ -3303,10 +4303,13 @@ async def text_handler(update, context):
         return
 
     # --------------------------------------------------------
-    # بازی
+    # GAME
     # --------------------------------------------------------
 
-    if text == "🎮 بازی":
+    if text in (
+        "🎮 بازی",
+        "بازی"
+    ):
 
         await game_menu(
             update,
@@ -3316,10 +4319,13 @@ async def text_handler(update, context):
         return
 
     # --------------------------------------------------------
-    # دوستان
+    # FRIEND
     # --------------------------------------------------------
 
-    if text == "👥 بازی با دوستان":
+    if text in (
+        "👥 بازی با دوستان",
+        "بازی با دوستان"
+    ):
 
         await friends_menu(
             update,
@@ -3329,10 +4335,13 @@ async def text_handler(update, context):
         return
 
     # --------------------------------------------------------
-    # ربات
+    # BOT
     # --------------------------------------------------------
 
-    if text == "🤖 بازی با ربات":
+    if text in (
+        "🤖 بازی با ربات",
+        "بازی با ربات"
+    ):
 
         await bot_menu(
             update,
@@ -3342,7 +4351,7 @@ async def text_handler(update, context):
         return
 
     # --------------------------------------------------------
-    # انتقال
+    # TRANSFER
     # --------------------------------------------------------
 
     if re.match(
@@ -3351,7 +4360,7 @@ async def text_handler(update, context):
         re.IGNORECASE
     ):
 
-        await transfer(
+        await transfer_command(
             update,
             context
         )
@@ -3359,7 +4368,7 @@ async def text_handler(update, context):
         return
 
     # --------------------------------------------------------
-    # درخواست
+    # REQUEST
     # --------------------------------------------------------
 
     if re.match(
@@ -3390,10 +4399,32 @@ async def text_handler(update, context):
         return
 
     # --------------------------------------------------------
-    # راهنما
+    # REFERRAL
     # --------------------------------------------------------
 
-    if text == "📖 راهنما":
+    if text in (
+        "👥 زیرمجموعه",
+        "زیرمجموعه",
+        "رفرال",
+        "referral"
+    ):
+
+        await referral_menu(
+            update,
+            context
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # HELP
+    # --------------------------------------------------------
+
+    if text in (
+        "📖 راهنما",
+        "راهنما",
+        "help"
+    ):
 
         await help_command(
             update,
@@ -3404,40 +4435,18 @@ async def text_handler(update, context):
 
 
 # ============================================================
-# CALLBACK ROUTER
+# COMMAND: BALANCE
 # ============================================================
 
-async def action_callback(update, context):
+async def balance_command(
+    update,
+    context
+):
 
-    data = update.callback_query.data
-
-    if data == "check_join":
-        await game_callback(
-            update,
-            context
-        )
-        return
-
-    if data.startswith("join_"):
-        await join_friend(
-            update,
-            context
-        )
-        return
-
-    if data.startswith("bot_"):
-        await join_bot(
-            update,
-            context
-        )
-        return
-
-    if data.startswith("cancel_"):
-        await cancel_game(
-            update,
-            context
-        )
-        return
+    await show_balance(
+        update,
+        context
+    )
 
 
 # ============================================================
@@ -3449,78 +4458,14 @@ async def error_handler(
     context
 ):
 
-    error = context.error
-
     logger.error(
-        "HANDLER ERROR: %r",
-        error,
-        exc_info=(
-            type(error),
-            error,
-            error.__traceback__
-        ) if error else None
+        "UNHANDLED BOT ERROR: %s",
+        context.error,
+        exc_info=context.error
     )
 
-    # مهم:
-    # خطای یک آپدیت نباید باعث خاموش شدن کل برنامه شود.
-    return
-
-
-# ============================================================
-# CLEANUP STUCK GAMES
-# ============================================================
-
-async def cleanup_stuck_games(
-    context
-):
-
-    """
-    بازی‌های bot_rolling که بعد از crash
-    در دیتابیس گیر کرده‌اند را بررسی می‌کند.
-
-    اگر مدت زیادی از ایجاد بازی گذشته باشد،
-    مبلغ کاربر برگردانده می‌شود.
-    """
-
-    try:
-
-        with closing(db()) as con:
-
-            rows = con.execute("""
-            SELECT *
-            FROM games
-            WHERE status='bot_rolling'
-            AND created_at <= datetime(
-                'now',
-                '-10 minutes'
-            )
-            LIMIT 50
-            """).fetchall()
-
-        for game in rows:
-
-            try:
-
-                await refund_bot_game(
-                    context,
-                    int(game["id"]),
-                    int(game["creator_id"]),
-                    D(game["amount"]),
-                    int(game["chat_id"]),
-                    "بازی بیش از حد طولانی شد."
-                )
-
-            except Exception:
-
-                logger.exception(
-                    "CLEANUP GAME ERROR"
-                )
-
-    except Exception:
-
-        logger.exception(
-            "CLEANUP ERROR"
-        )
+    # عمداً exception را دوباره raise نمی‌کنیم
+    # تا polling متوقف نشود.
 
 
 # ============================================================
@@ -3531,21 +4476,15 @@ async def post_init(
     application
 ):
 
-    logger.info(
-        "BOT INITIALIZED"
+    # بازی‌های قدیمی به صورت background مدیریت می‌شوند.
+    application.create_task(
+        recover_stale_games(
+            application
+        )
     )
 
-
-# ============================================================
-# POST SHUTDOWN
-# ============================================================
-
-async def post_shutdown(
-    application
-):
-
     logger.info(
-        "BOT SHUTDOWN"
+        "Recovery task started"
     )
 
 
@@ -3567,7 +4506,6 @@ def main():
         Application.builder()
         .token(BOT_TOKEN)
         .post_init(post_init)
-        .post_shutdown(post_shutdown)
         .build()
     )
 
@@ -3592,7 +4530,7 @@ def main():
     application.add_handler(
         CommandHandler(
             "balance",
-            show_balance
+            balance_command
         )
     )
 
@@ -3613,7 +4551,7 @@ def main():
     application.add_handler(
         CommandHandler(
             "admin",
-            admin
+            admin_command
         )
     )
 
@@ -3634,48 +4572,58 @@ def main():
     application.add_handler(
         CommandHandler(
             "block",
-            block
+            block_command
         )
     )
 
     application.add_handler(
         CommandHandler(
             "unblock",
-            unblock
+            unblock_command
         )
     )
 
     # --------------------------------------------------------
-    # FORCE JOIN / GAME BUTTONS
+    # GAME BUTTONS
     # --------------------------------------------------------
 
     application.add_handler(
         CallbackQueryHandler(
-            game_callback,
-            pattern=r"^game_"
+            check_join_callback,
+            pattern=r"^check_join$"
         )
     )
 
     application.add_handler(
         CallbackQueryHandler(
-            action_callback,
-            pattern=r"^(join_|bot_|cancel_|check_join)$"
+            game_help_callback,
+            pattern=r"^help_game_"
         )
     )
-
-    # --------------------------------------------------------
-    # ADMIN
-    # --------------------------------------------------------
 
     application.add_handler(
         CallbackQueryHandler(
-            admin_callback,
-            pattern=r"^admin_"
+            join_friend,
+            pattern=r"^join_\d+$"
+        )
+    )
+
+    application.add_handler(
+        CallbackQueryHandler(
+            play_vs_bot,
+            pattern=r"^bot_\d+$"
+        )
+    )
+
+    application.add_handler(
+        CallbackQueryHandler(
+            cancel_game,
+            pattern=r"^cancel_\d+$"
         )
     )
 
     # --------------------------------------------------------
-    # DICE / BOWLING / BASKETBALL / DART
+    # DICE / BOWLING / BASKETBALL / DARTS
     # --------------------------------------------------------
 
     application.add_handler(
@@ -3692,48 +4640,59 @@ def main():
 
     application.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
+            filters.TEXT &
+            ~filters.COMMAND,
             text_handler
         ),
         group=1
     )
 
-    # --------------------------------------------------------
-    # ERROR HANDLER
-    # --------------------------------------------------------
-
     application.add_error_handler(
         error_handler
     )
 
-    # --------------------------------------------------------
-    # CLEANUP JOB
-    # --------------------------------------------------------
-
-    if application.job_queue:
-
-        application.job_queue.run_repeating(
-            cleanup_stuck_games,
-            interval=60,
-            first=60
-        )
-
     logger.info(
-        "🚀 BOT STARTED"
+        "========================================"
     )
 
-    # retry بی‌نهایت در مرحله اتصال
-    # و مدیریت صحیح polling
+    logger.info(
+        "BOT STARTED"
+    )
+
+    logger.info(
+        "Unlimited game rounds: ENABLED"
+    )
+
+    logger.info(
+        "Bot game self-roll: ENABLED"
+    )
+
+    logger.info(
+        "Friend game self-roll: ENABLED"
+    )
+
+    logger.info(
+        "Atomic balance: ENABLED"
+    )
+
+    logger.info(
+        "Recovery system: ENABLED"
+    )
+
+    logger.info(
+        "========================================"
+    )
+
+    # --------------------------------------------------------
+    # مهم:
+    # run_polling خودش event loop را مدیریت می‌کند.
+    # آن را داخل asyncio.run قرار نده.
+    # --------------------------------------------------------
+
     application.run_polling(
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=True,
-        bootstrap_retries=-1,
-        poll_interval=0.5,
-        timeout=20,
-        read_timeout=20,
-        write_timeout=20,
-        connect_timeout=20,
-        pool_timeout=20
+        close_loop=True
     )
 
 
@@ -3742,4 +4701,16 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+
+    except KeyboardInterrupt:
+        logger.info(
+            "BOT STOPPED BY USER"
+        )
+
+    except Exception:
+        logger.exception(
+            "FATAL STARTUP ERROR"
+        )
+        raise
