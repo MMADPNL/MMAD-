@@ -2201,17 +2201,10 @@ def main():
     )
 
     application.add_handler(
-        CommandHandler(
-            "موجودی",
-            balance_command
-        )
+    MessageHandler(
+        filters.Regex(r"^/(?:موجودی|ترونی)(?:@\w+)?$"),
+        balance_command
     )
-
-    application.add_handler(
-        CommandHandler(
-            "ترونی",
-            balance_command
-        )
     )
 
     application.add_handler(
