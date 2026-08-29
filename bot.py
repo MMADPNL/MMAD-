@@ -220,6 +220,7 @@ def change_balance(user_id, amount):
             )).fetchone()
 
             if not row:
+
                 con.rollback()
                 return False
 
@@ -229,10 +230,11 @@ def change_balance(user_id, amount):
             )
 
             if new_balance < 0:
+
                 con.rollback()
                 return False
 
-            con.execute("""
+            cur = con.execute("""
             UPDATE users
             SET balance=?
             WHERE user_id=?
@@ -240,6 +242,11 @@ def change_balance(user_id, amount):
                 round(new_balance, 8),
                 user_id
             ))
+
+            if cur.rowcount != 1:
+
+                con.rollback()
+                return False
 
             con.commit()
             return True
@@ -847,7 +854,7 @@ async def create_game(
 
                 return
 
-            con.execute("""
+            cur = con.execute("""
             UPDATE users
             SET balance=balance-?
             WHERE user_id=?
@@ -858,7 +865,7 @@ async def create_game(
                 amount
             ))
 
-            if con.total_changes != 1:
+            if cur.rowcount != 1:
 
                 con.rollback()
                 return
@@ -973,6 +980,7 @@ async def join_game(
     user = q.from_user
 
     if not user:
+
         await q.answer()
         return
 
@@ -1057,10 +1065,6 @@ async def join_game(
                 game_id,
             )).fetchone()
 
-            # =================================================
-            # این قسمت تضمین می‌کند فقط یک نفر وارد شود
-            # =================================================
-
             if (
                 not current
                 or
@@ -1099,7 +1103,7 @@ async def join_game(
 
                 return
 
-            con.execute("""
+            cur = con.execute("""
             UPDATE users
             SET balance=balance-?
             WHERE user_id=?
@@ -1110,7 +1114,7 @@ async def join_game(
                 amount
             ))
 
-            if con.total_changes != 1:
+            if cur.rowcount != 1:
 
                 con.rollback()
 
@@ -1121,7 +1125,7 @@ async def join_game(
 
                 return
 
-            con.execute("""
+            cur = con.execute("""
             UPDATE games
             SET
                 opponent=?,
@@ -1134,21 +1138,9 @@ async def join_game(
                 game_id
             ))
 
-            if con.total_changes != 1:
+            if cur.rowcount != 1:
 
                 con.rollback()
-
-                # در صورت رقابت همزمان پول برگشت داده می‌شود
-                con.execute("""
-                UPDATE users
-                SET balance=balance+?
-                WHERE user_id=?
-                """, (
-                    amount,
-                    user.id
-                ))
-
-                con.commit()
 
                 await q.answer(
                     "❌ این بازی توسط شخص دیگری گرفته شد.",
@@ -1222,6 +1214,7 @@ async def robot_game(
     user = q.from_user
 
     if not user:
+
         await q.answer()
         return
 
@@ -1287,7 +1280,7 @@ async def robot_game(
 
                 return
 
-            con.execute("""
+            cur = con.execute("""
             UPDATE games
             SET
                 opponent=0,
@@ -1299,7 +1292,7 @@ async def robot_game(
                 game_id,
             ))
 
-            if con.total_changes != 1:
+            if cur.rowcount != 1:
 
                 con.rollback()
 
@@ -1428,7 +1421,7 @@ async def cancel_game(
                 con.rollback()
                 return
 
-            con.execute("""
+            cur = con.execute("""
             UPDATE games
             SET status='cancelled'
             WHERE id=?
@@ -1437,7 +1430,7 @@ async def cancel_game(
                 game_id,
             ))
 
-            if con.total_changes != 1:
+            if cur.rowcount != 1:
 
                 con.rollback()
                 return
@@ -1566,7 +1559,7 @@ async def robot_throw(
                 con.rollback()
                 return None
 
-            con.execute("""
+            cur = con.execute("""
             UPDATE games
             SET
                 opponent_round=opponent_round+1,
@@ -1579,7 +1572,7 @@ async def robot_throw(
                 game_id
             ))
 
-            if con.total_changes != 1:
+            if cur.rowcount != 1:
 
                 con.rollback()
                 return None
@@ -1647,7 +1640,7 @@ async def finish_game(
                 con.rollback()
                 return False
 
-            con.execute("""
+            cur = con.execute("""
             UPDATE games
             SET status='finished'
             WHERE id=?
@@ -1656,7 +1649,7 @@ async def finish_game(
                 game_id,
             ))
 
-            if con.total_changes != 1:
+            if cur.rowcount != 1:
 
                 con.rollback()
                 return False
@@ -1947,7 +1940,7 @@ async def game_dice_handler(
                     con.rollback()
                     return
 
-                con.execute("""
+                cur = con.execute("""
                 UPDATE games
                 SET
                     creator_round=creator_round+1,
@@ -1960,7 +1953,7 @@ async def game_dice_handler(
                     game["id"]
                 ))
 
-                if con.total_changes != 1:
+                if cur.rowcount != 1:
 
                     con.rollback()
                     return
@@ -2103,7 +2096,7 @@ async def game_dice_handler(
                     con.rollback()
                     return
 
-                con.execute("""
+                cur = con.execute("""
                 UPDATE games
                 SET
                     creator_round=creator_round+1,
@@ -2117,7 +2110,7 @@ async def game_dice_handler(
                     game["id"]
                 ))
 
-                if con.total_changes != 1:
+                if cur.rowcount != 1:
 
                     con.rollback()
                     return
@@ -2184,7 +2177,7 @@ async def game_dice_handler(
                     con.rollback()
                     return
 
-                con.execute("""
+                cur = con.execute("""
                 UPDATE games
                 SET
                     opponent_round=opponent_round+1,
@@ -2198,7 +2191,7 @@ async def game_dice_handler(
                     game["id"]
                 ))
 
-                if con.total_changes != 1:
+                if cur.rowcount != 1:
 
                     con.rollback()
                     return
@@ -2259,6 +2252,7 @@ async def transfer_handler(
     if not msg:
         return
 
+    # انتقال فقط در گروه
     if msg.chat.type not in (
         ChatType.GROUP,
         ChatType.SUPERGROUP
@@ -2270,6 +2264,7 @@ async def transfer_handler(
 
         return
 
+    # باید روی پیام گیرنده Reply شده باشد
     if not msg.reply_to_message:
 
         await msg.reply_text(
@@ -2285,6 +2280,7 @@ async def transfer_handler(
     if not user:
         return
 
+    # متن دستور
     text = digits(
         msg.text.strip()
     )
@@ -2310,6 +2306,11 @@ async def transfer_handler(
         )
 
     except Exception:
+
+        await msg.reply_text(
+            "❌ مبلغ نامعتبر است."
+        )
+
         return
 
     if amount <= 0 or amount > 1000000:
@@ -2320,13 +2321,20 @@ async def transfer_handler(
 
         return
 
-    receiver = (
-        msg.reply_to_message.from_user
-    )
+    # پیام Reply شده
+    replied_message = msg.reply_to_message
+
+    receiver = replied_message.from_user
 
     if not receiver:
+
+        await msg.reply_text(
+            "❌ گیرنده پیدا نشد."
+        )
+
         return
 
+    # انتقال به خود
     if receiver.id == user.id:
 
         await msg.reply_text(
@@ -2335,6 +2343,7 @@ async def transfer_handler(
 
         return
 
+    # انتقال به ربات
     if receiver.is_bot:
 
         await msg.reply_text(
@@ -2345,6 +2354,17 @@ async def transfer_handler(
 
     register(user)
     register(receiver)
+
+    # =====================================================
+    # انتقال اتمیک
+    #
+    # نکته مهم:
+    # قبلاً از con.total_changes استفاده شده بود.
+    # total_changes تعداد تغییرات کل connection است
+    # و بعد از UPDATE دوم مقدارش 2 می‌شود.
+    #
+    # اینجا rowcount استفاده شده تا انتقال درست انجام شود.
+    # =====================================================
 
     with closing(db()) as con:
 
@@ -2362,23 +2382,39 @@ async def transfer_handler(
                 user.id,
             )).fetchone()
 
-            if (
-                not sender
-                or
-                float(sender["balance"])
-                <
-                amount
-            ):
+            if not sender:
 
                 con.rollback()
 
                 await msg.reply_text(
-                    "❌ موجودی کافی نیست."
+                    "❌ حساب فرستنده پیدا نشد."
                 )
 
                 return
 
-            con.execute("""
+            sender_balance = float(
+                sender["balance"]
+            )
+
+            if sender_balance < amount:
+
+                con.rollback()
+
+                await msg.reply_text(
+
+                    "❌ موجودی کافی نیست.\n\n"
+
+                    f"💰 موجودی شما: "
+                    f"{money(sender_balance)} TRX\n"
+
+                    f"💸 مبلغ انتقال: "
+                    f"{money(amount)} TRX"
+                )
+
+                return
+
+            # کم کردن موجودی فرستنده
+            sender_update = con.execute("""
             UPDATE users
             SET balance=balance-?
             WHERE user_id=?
@@ -2389,21 +2425,7 @@ async def transfer_handler(
                 amount
             ))
 
-            if con.total_changes != 1:
-
-                con.rollback()
-                return
-
-            con.execute("""
-            UPDATE users
-            SET balance=balance+?
-            WHERE user_id=?
-            """, (
-                amount,
-                receiver.id
-            ))
-
-            if con.total_changes != 1:
+            if sender_update.rowcount != 1:
 
                 con.rollback()
 
@@ -2413,6 +2435,27 @@ async def transfer_handler(
 
                 return
 
+            # اضافه کردن موجودی گیرنده
+            receiver_update = con.execute("""
+            UPDATE users
+            SET balance=balance+?
+            WHERE user_id=?
+            """, (
+                amount,
+                receiver.id
+            ))
+
+            if receiver_update.rowcount != 1:
+
+                con.rollback()
+
+                await msg.reply_text(
+                    "❌ گیرنده در دیتابیس پیدا نشد."
+                )
+
+                return
+
+            # نهایی کردن هر دو عملیات
             con.commit()
 
         except Exception:
@@ -2429,18 +2472,26 @@ async def transfer_handler(
 
             return
 
+    # موجودی جدید فرستنده
+    new_balance = get_balance(
+        user.id
+    )
+
     await msg.reply_text(
 
         "✅ انتقال با موفقیت انجام شد.\n\n"
+
+        f"👤 فرستنده: "
+        f"{user.full_name}\n"
 
         f"👤 گیرنده: "
         f"{receiver.full_name}\n"
 
         f"💰 مقدار: "
-        f"{money(amount)} TRX\n"
+        f"{money(amount)} TRX\n\n"
 
         f"💳 موجودی شما: "
-        f"{money(get_balance(user.id))} TRX"
+        f"{money(new_balance)} TRX"
     )
 
 
@@ -2467,11 +2518,13 @@ async def reset_games_command(
     if user.id != OWNER_ID:
 
         if msg:
+
             await msg.reply_text(
                 "❌ فقط مالک ربات اجازه ریست دارد."
             )
 
         elif update.callback_query:
+
             await update.callback_query.answer(
                 "❌ فقط مالک ربات اجازه ریست دارد.",
                 show_alert=True
@@ -2858,7 +2911,6 @@ async def admin_reset(
 
         return
 
-    # اینجا تابع جدید درست کار می‌کند
     await reset_games_command(
         update,
         context
@@ -3215,12 +3267,8 @@ async def text_router(
 
     # =====================================================
     # ریست
-    #
-    # فقط یک دستور:
-    # ریست
-    #
-    # هم گپ و هم PV
     # فقط مالک
+    # هم گپ و هم PV
     # =====================================================
 
     if text == "ریست":
@@ -3297,7 +3345,6 @@ async def text_router(
 
     # =====================================================
     # GAMES MENU
-    # فقط یک عبارت اصلی: بازی
     # =====================================================
 
     if text in (
