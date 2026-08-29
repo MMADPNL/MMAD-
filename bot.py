@@ -583,14 +583,15 @@ async def games_menu(
         "🏀 3 بسکتبال 100\n"
         "🎳 3 بولینگ 100\n\n"
 
-        "عدد اول = تعداد پرتاب\n"
-        "عدد آخر = مبلغ شرط\n\n"
+        "🔢 عدد اول = تعداد پرتاب\n"
+        "💰 عدد آخر = مبلغ شرط\n\n"
 
-        "🤖 برای بازی با ربات، بعد از ساخت بازی "
-        "روی «بازی با ربات» بزن.\n\n"
+        "👥 بازی با دوستان:\n"
+        "بعد از ساخت بازی، دکمه «ورود به بازی» برای همه قابل استفاده است.\n"
+        "فقط یک نفر می‌تواند وارد هر بازی شود.\n\n"
 
-        "👥 برای بازی با شخص دیگر، "
-        "او روی «ورود به بازی» بزند."
+        "🤖 بازی با ربات:\n"
+        "سازنده می‌تواند ربات را انتخاب کند."
     )
 
 
@@ -606,17 +607,13 @@ async def games_command(
 
         "🎮 بازی‌ها\n\n"
 
-        "🎲 تاس:\n"
-        "3 تاس 100\n\n"
+        "🎲 3 تاس 100\n"
+        "🎯 3 دارت 100\n"
+        "🏀 3 بسکتبال 100\n"
+        "🎳 3 بولینگ 100\n\n"
 
-        "🎯 دارت:\n"
-        "3 دارت 100\n\n"
-
-        "🏀 بسکتبال:\n"
-        "3 بسکتبال 100\n\n"
-
-        "🎳 بولینگ:\n"
-        "3 بولینگ 100"
+        "مثال:\n"
+        "3 تاس 500"
     )
 
 
@@ -663,12 +660,13 @@ async def help_menu(
         "🎮 ساخت بازی:\n"
         "3 تاس 100\n\n"
 
-        "🤖 بازی با ربات:\n"
-        "تمام پرتاب‌های خودت را انجام بده؛ "
-        "بعد از آخرین پرتاب، ربات سریع شروع می‌کند.\n\n"
+        "👥 بازی با دوستان:\n"
+        "دکمه «ورود به بازی» برای همه باز است.\n"
+        "هر بازی فقط یک بازیکن دوم می‌پذیرد.\n\n"
 
-        "👥 بازی دوستان:\n"
-        "بازیکن دوم روی دکمه ورود می‌زند."
+        "🤖 بازی با ربات:\n"
+        "سازنده روی «بازی با ربات» می‌زند.\n"
+        "بعد از آخرین پرتاب بازیکن، ربات شروع می‌کند."
     )
 
 
@@ -685,8 +683,7 @@ async def transfer_menu(
 
         "🔄 انتقال\n\n"
 
-        "روی پیام شخصی که می‌خواهی پول برایش بفرستی "
-        "Reply کن و بنویس:\n\n"
+        "روی پیام شخصی که می‌خواهی برایش پول بفرستی Reply کن و بنویس:\n\n"
 
         "انتقال 100"
     )
@@ -939,7 +936,7 @@ async def create_game(
 
     await msg.reply_text(
 
-        f"{parsed['emoji']} بازی ساخته شد.\n\n"
+        f"{parsed['emoji']} بازی با دوستان ساخته شد!\n\n"
 
         f"👤 سازنده: "
         f"{display_name(user.id)}\n"
@@ -953,8 +950,10 @@ async def create_game(
         f"💰 شرط: "
         f"{money(amount)} TRX\n\n"
 
-        "👥 بازیکن دوم وارد شود یا\n"
-        "🤖 با ربات بازی کنید.",
+        "👥 هر بازیکنی می‌تواند روی «ورود به بازی» بزند.\n"
+        "⚠️ فقط یک نفر می‌تواند وارد این بازی شود.\n\n"
+
+        "🤖 یا سازنده می‌تواند با ربات بازی کند.",
 
         reply_markup=keyboard
     )
@@ -971,19 +970,18 @@ async def join_game(
 
     q = update.callback_query
 
-    game_id = q.data.split(
-        ":",
-        1
-    )[1]
-
     user = q.from_user
 
     if not user:
-
         await q.answer()
         return
 
     register(user)
+
+    game_id = q.data.split(
+        ":",
+        1
+    )[1]
 
     game = get_game(
         game_id
@@ -1001,7 +999,7 @@ async def join_game(
     if game["status"] != "waiting":
 
         await q.answer(
-            "❌ بازی دیگر قابل ورود نیست.",
+            "❌ این بازی قبلاً توسط یک نفر گرفته شده.",
             show_alert=True
         )
 
@@ -1010,7 +1008,7 @@ async def join_game(
     if user.id == game["creator"]:
 
         await q.answer(
-            "❌ نمی‌توانی وارد بازی خودت شوی.",
+            "❌ سازنده نمی‌تواند وارد بازی خودش شود.",
             show_alert=True
         )
 
@@ -1022,6 +1020,18 @@ async def join_game(
 
         await q.answer(
             "❌ شما یک بازی فعال دارید.",
+            show_alert=True
+        )
+
+        return
+
+    if not await member_ok(
+        context.bot,
+        user.id
+    ):
+
+        await q.answer(
+            "❌ ابتدا عضو کانال شوید.",
             show_alert=True
         )
 
@@ -1047,6 +1057,10 @@ async def join_game(
                 game_id,
             )).fetchone()
 
+            # =================================================
+            # این قسمت تضمین می‌کند فقط یک نفر وارد شود
+            # =================================================
+
             if (
                 not current
                 or
@@ -1056,7 +1070,7 @@ async def join_game(
                 con.rollback()
 
                 await q.answer(
-                    "❌ بازی قبلاً گرفته شده.",
+                    "❌ یک نفر دیگر قبلاً وارد بازی شده.",
                     show_alert=True
                 )
 
@@ -1109,7 +1123,8 @@ async def join_game(
 
             con.execute("""
             UPDATE games
-            SET opponent=?,
+            SET
+                opponent=?,
                 mode='friend',
                 status='playing'
             WHERE id=?
@@ -1123,8 +1138,20 @@ async def join_game(
 
                 con.rollback()
 
+                # در صورت رقابت همزمان پول برگشت داده می‌شود
+                con.execute("""
+                UPDATE users
+                SET balance=balance+?
+                WHERE user_id=?
+                """, (
+                    amount,
+                    user.id
+                ))
+
+                con.commit()
+
                 await q.answer(
-                    "❌ بازی گرفته شده.",
+                    "❌ این بازی توسط شخص دیگری گرفته شد.",
                     show_alert=True
                 )
 
@@ -1141,25 +1168,25 @@ async def join_game(
             )
 
             await q.answer(
-                "❌ خطا.",
+                "❌ خطا در ورود به بازی.",
                 show_alert=True
             )
 
             return
 
     await q.answer(
-        "✅ بازی شروع شد."
+        "✅ وارد بازی شدی."
     )
 
     await q.message.reply_text(
 
         "🎮 بازی شروع شد!\n\n"
 
-        f"👤 سازنده: "
+        f"👤 بازیکن اول: "
         f"{display_name(game['creator'])}\n"
 
-        f"👤 حریف: "
-        f"{display_name(user.id)}\n"
+        f"👤 بازیکن دوم: "
+        f"{display_name(user.id)}\n\n"
 
         f"{game['emoji']} بازی: "
         f"{game['game']}\n"
@@ -1194,6 +1221,10 @@ async def robot_game(
 
     user = q.from_user
 
+    if not user:
+        await q.answer()
+        return
+
     game = get_game(
         game_id
     )
@@ -1210,7 +1241,7 @@ async def robot_game(
     if user.id != game["creator"]:
 
         await q.answer(
-            "❌ فقط سازنده می‌تواند.",
+            "❌ فقط سازنده می‌تواند با ربات بازی کند.",
             show_alert=True
         )
 
@@ -1250,7 +1281,7 @@ async def robot_game(
                 con.rollback()
 
                 await q.answer(
-                    "❌ بازی دیگر قابل شروع نیست.",
+                    "❌ این بازی قبلاً گرفته شده.",
                     show_alert=True
                 )
 
@@ -1258,7 +1289,8 @@ async def robot_game(
 
             con.execute("""
             UPDATE games
-            SET opponent=0,
+            SET
+                opponent=0,
                 mode='robot',
                 status='playing'
             WHERE id=?
@@ -1317,7 +1349,7 @@ async def robot_game(
         f"💰 شرط: "
         f"{money(game['amount'])} TRX\n\n"
 
-        f"🎮 حالا {game['rounds']} پرتاب خودت را انجام بده.\n"
+        f"👤 حالا تمام {game['rounds']} پرتاب خودت را انجام بده.\n"
 
         "⚡ بعد از آخرین پرتاب، ربات سریع شروع می‌کند "
         "و نتیجه اعلام می‌شود."
@@ -1356,7 +1388,7 @@ async def cancel_game(
     if q.from_user.id != game["creator"]:
 
         await q.answer(
-            "❌ فقط سازنده.",
+            "❌ فقط سازنده می‌تواند لغو کند.",
             show_alert=True
         )
 
@@ -1432,7 +1464,7 @@ async def cancel_game(
             return
 
     await q.answer(
-        "✅ لغو شد."
+        "✅ بازی لغو شد."
     )
 
     await q.message.reply_text(
@@ -1657,7 +1689,7 @@ async def finish_game(
                 winner_text = (
 
                     f"🏆 برنده: "
-                    f"{display_name(game['creator'])}\n"
+                    f"{display_name(game['creator'])}\n\n"
 
                     f"💰 جایزه: "
                     f"{money(pot)} TRX"
@@ -1679,7 +1711,7 @@ async def finish_game(
                     winner_text = (
 
                         f"🏆 برنده: "
-                        f"{display_name(game['opponent'])}\n"
+                        f"{display_name(game['opponent'])}\n\n"
 
                         f"💰 جایزه: "
                         f"{money(pot)} TRX"
@@ -1689,9 +1721,9 @@ async def finish_game(
 
                     winner_text = (
 
-                        "🏆 برنده: 🤖 ربات\n"
+                        "🏆 برنده: 🤖 ربات\n\n"
 
-                        "💰 جایزه به ربات تعلق گرفت."
+                        "💰 ربات موجودی واقعی ندارد."
                     )
 
             else:
@@ -1718,7 +1750,7 @@ async def finish_game(
 
                     winner_text = (
 
-                        "🤝 بازی مساوی شد.\n"
+                        "🤝 بازی مساوی شد.\n\n"
 
                         f"💰 {money(amount)} TRX "
                         "به هر نفر برگشت."
@@ -1728,7 +1760,7 @@ async def finish_game(
 
                     winner_text = (
 
-                        "🤝 بازی مساوی شد.\n"
+                        "🤝 بازی مساوی شد.\n\n"
 
                         f"💰 {money(amount)} TRX "
                         "به بازیکن برگشت."
@@ -1762,7 +1794,7 @@ async def finish_game(
 
         f"{game['emoji']} نتیجه بازی\n\n"
 
-        f"👤 سازنده: "
+        f"👤 بازیکن اول: "
         f"{creator_name}\n"
 
         f"🤖 حریف: "
@@ -1774,7 +1806,7 @@ async def finish_game(
         f"🔢 تعداد پرتاب: "
         f"{game['rounds']}\n\n"
 
-        "📊 امتیاز نهایی:\n"
+        "📊 امتیاز نهایی:\n\n"
 
         f"👤 {creator_name}: "
         f"{creator_score}\n"
@@ -1952,7 +1984,6 @@ async def game_dice_handler(
         if not current:
             return
 
-        # کاربر هنوز پرتاب دارد
         if (
             current["creator_round"]
             <
@@ -1961,8 +1992,7 @@ async def game_dice_handler(
             return
 
         # =================================================
-        # کاربر تمام پرتاب‌ها را انجام داده
-        # ربات بلافاصله شروع می‌کند
+        # ربات سریع شروع می‌کند
         # =================================================
 
         while True:
@@ -2229,17 +2259,17 @@ async def transfer_handler(
     if not msg:
         return
 
-    # فقط داخل گپ
     if msg.chat.type not in (
         ChatType.GROUP,
         ChatType.SUPERGROUP
     ):
+
         await msg.reply_text(
-            "❌ انتقال با Reply در گپ انجام می‌شود."
+            "❌ انتقال با Reply فقط در گپ انجام می‌شود."
         )
+
         return
 
-    # حتماً Reply باشد
     if not msg.reply_to_message:
 
         await msg.reply_text(
@@ -2280,7 +2310,6 @@ async def transfer_handler(
         )
 
     except Exception:
-
         return
 
     if amount <= 0 or amount > 1000000:
@@ -2298,7 +2327,6 @@ async def transfer_handler(
     if not receiver:
         return
 
-    # جلوگیری از انتقال به خود
     if receiver.id == user.id:
 
         await msg.reply_text(
@@ -2307,7 +2335,6 @@ async def transfer_handler(
 
         return
 
-    # جلوگیری از انتقال به ربات
     if receiver.is_bot:
 
         await msg.reply_text(
@@ -2318,10 +2345,6 @@ async def transfer_handler(
 
     register(user)
     register(receiver)
-
-    # =====================================================
-    # انتقال اتمیک
-    # =====================================================
 
     with closing(db()) as con:
 
@@ -2422,8 +2445,10 @@ async def transfer_handler(
 
 
 # =========================================================
-# RESET ALL ACTIVE GAMES
-# OWNER ONLY
+# RESET ACTIVE GAMES
+# فقط OWNER
+# فقط یک دستور: ریست
+# هم گپ و هم PV
 # =========================================================
 
 async def reset_games_command(
@@ -2433,9 +2458,6 @@ async def reset_games_command(
 
     msg = update.message
 
-    if not msg:
-        return
-
     user = update.effective_user
 
     if not user:
@@ -2443,14 +2465,17 @@ async def reset_games_command(
 
     # فقط مالک
     if user.id != OWNER_ID:
-        return
 
-    # فقط PV مالک
-    if msg.chat.type != ChatType.PRIVATE:
+        if msg:
+            await msg.reply_text(
+                "❌ فقط مالک ربات اجازه ریست دارد."
+            )
 
-        await msg.reply_text(
-            "❌ دستور ریست فقط در PV مالک قابل استفاده است."
-        )
+        elif update.callback_query:
+            await update.callback_query.answer(
+                "❌ فقط مالک ربات اجازه ریست دارد.",
+                show_alert=True
+            )
 
         return
 
@@ -2472,9 +2497,18 @@ async def reset_games_command(
 
                 con.commit()
 
-                await msg.reply_text(
-                    "✅ هیچ بازی فعالی وجود ندارد."
-                )
+                if msg:
+
+                    await msg.reply_text(
+                        "✅ هیچ بازی فعالی وجود ندارد."
+                    )
+
+                elif update.callback_query:
+
+                    await update.callback_query.answer(
+                        "✅ هیچ بازی فعالی وجود ندارد.",
+                        show_alert=True
+                    )
 
                 return
 
@@ -2487,7 +2521,7 @@ async def reset_games_command(
                     game["amount"]
                 )
 
-                # شرط سازنده همیشه کسر شده
+                # شرط سازنده
                 con.execute("""
                 UPDATE users
                 SET balance=balance+?
@@ -2499,8 +2533,7 @@ async def reset_games_command(
 
                 returned += amount
 
-                # اگر بازی دو نفره است،
-                # شرط نفر دوم هم برگردد
+                # شرط بازیکن دوم
                 if (
                     game["mode"] == "friend"
                     and
@@ -2522,7 +2555,6 @@ async def reset_games_command(
 
                 count += 1
 
-            # بستن تمام بازی‌های فعال
             con.execute("""
             UPDATE games
             SET status='cancelled'
@@ -2539,13 +2571,22 @@ async def reset_games_command(
                 "RESET GAMES ERROR"
             )
 
-            await msg.reply_text(
-                "❌ ریست انجام نشد."
-            )
+            if msg:
+
+                await msg.reply_text(
+                    "❌ ریست انجام نشد."
+                )
+
+            elif update.callback_query:
+
+                await update.callback_query.answer(
+                    "❌ ریست انجام نشد.",
+                    show_alert=True
+                )
 
             return
 
-    await msg.reply_text(
+    result_text = (
 
         "♻️ ریست بازی‌ها انجام شد.\n\n"
 
@@ -2558,6 +2599,23 @@ async def reset_games_command(
         "✅ تمام بازی‌های فعال بسته شدند.\n"
         "✅ شرط‌های بلوکه‌شده برگشت داده شدند."
     )
+
+    if msg:
+
+        await msg.reply_text(
+            result_text
+        )
+
+    elif update.callback_query:
+
+        await update.callback_query.answer(
+            "✅ ریست انجام شد.",
+            show_alert=True
+        )
+
+        await update.callback_query.message.reply_text(
+            result_text
+        )
 
 
 # =========================================================
@@ -2783,14 +2841,24 @@ async def admin_reset(
     q = update.callback_query
 
     if q.from_user.id != OWNER_ID:
+
+        await q.answer(
+            "❌ دسترسی ندارید.",
+            show_alert=True
+        )
+
         return
 
     if q.message.chat.type != ChatType.PRIVATE:
+
+        await q.answer(
+            "❌ پنل مدیریت فقط در PV مالک است.",
+            show_alert=True
+        )
+
         return
 
-    await q.answer()
-
-    # اجرای همان ریست
+    # اینجا تابع جدید درست کار می‌کند
     await reset_games_command(
         update,
         context
@@ -3146,17 +3214,24 @@ async def text_router(
         return
 
     # =====================================================
-    # RESET
-    # فقط مالک + فقط PV
+    # ریست
+    #
+    # فقط یک دستور:
+    # ریست
+    #
+    # هم گپ و هم PV
+    # فقط مالک
     # =====================================================
 
-    if (
-        text == "ریست"
-        and
-        user.id == OWNER_ID
-        and
-        msg.chat.type == ChatType.PRIVATE
-    ):
+    if text == "ریست":
+
+        if user.id != OWNER_ID:
+
+            await msg.reply_text(
+                "❌ فقط مالک ربات اجازه ریست دارد."
+            )
+
+            return
 
         await reset_games_command(
             update,
@@ -3222,11 +3297,10 @@ async def text_router(
 
     # =====================================================
     # GAMES MENU
+    # فقط یک عبارت اصلی: بازی
     # =====================================================
 
     if text in (
-        "بازی ها",
-        "بازی‌ها",
         "بازی",
         "گیم",
         "games"
@@ -3260,11 +3334,6 @@ async def text_router(
         )
 
         return
-
-    # =====================================================
-    # OTHER TEXT
-    # هیچ کاری نمی‌کند
-    # =====================================================
 
 
 # =========================================================
@@ -3305,29 +3374,13 @@ def main():
     )
 
     # =====================================================
-    # COMMANDS
+    # START
     # =====================================================
 
     app.add_handler(
         CommandHandler(
             "start",
             start
-        )
-    )
-
-    # دستور بازی‌ها
-    app.add_handler(
-        CommandHandler(
-            "games",
-            games_command
-        )
-    )
-
-    # ریست فقط داخل تابع کنترل می‌شود
-    app.add_handler(
-        CommandHandler(
-            "reset",
-            reset_games_command
         )
     )
 
